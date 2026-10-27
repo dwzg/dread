@@ -1823,6 +1823,8 @@ def test_gizmo_i386_readable_c_passes_its_gate(tmp_path):
     out = tmp_path / "readable"
     assert readable.main(["--target", str(tmp_path / "gizmo" / "i386"), "--out", str(out), "read_line"]) == 0
     import re
-    head = re.search(r"^\w+ read_line\((\w+) (\w+), u32 sa0, u32 sa1\)$", (out / "read_line.c").read_text(), re.M)
-    # (the types pass gives eax another type where the cases take it: s32 with GCC 15, u32 kept with 13)
+    head = re.search(r"^\w+ read_line\((\w+) (\w+), (.*)sa0, u32 sa1\)$", (out / "read_line.c").read_text(), re.M)
+    # (the types pass gives eax another type where the cases take it: s32 with GCC 15, u32 kept with 13;
+    # the buffer, a stack parameter read whole, is the parameter and a pointer: dread.tidy stack_params)
     assert head and head.group(1) in ("s32", "u32") and head.group(2).startswith("eax"), head
+    assert head.group(3).rstrip().endswith("*"), head.group(0)

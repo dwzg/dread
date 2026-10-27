@@ -6634,6 +6634,27 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         the lifter's barrier into readable C in front of a statement that reads two values of volatile
         loads, where the layer says instructions fold memory operands (folds_memory_operands: x86).
         tests/test_x86.py: counter (refused without it).
+      - [x] Stack parameters as themselves in readable C (2026-10-27, dread.tidy stack_params): the lifters
+        read a stack argument through its address, *(volatile u32 *)((u32)&sa0), and i386's cdecl passes
+        every argument so; no x86 parameter took a type (the GCC -Os bench build had 66 typed variables of
+        2025 and 621 raw accesses, ARM's GCC -Os 338 of 2088 and 115). Where a function uses &P only so,
+        as a whole word, P is used as itself. On copies (readable check and figures): x86 GCC -Os raw
+        accesses 621 -> 232, pointers 96 -> 158, statements 6097 -> 5860, variables 2025 -> 1853;
+        uxListRemove(u32 eax_in, volatile u32 *sa0) with sa0[4] for eax + 0x10. ReadMultipleByte stays
+        lifted: a case whose original outcome changes with the stack's place (the check refuses it)
+        reached 4 instructions no other case reaches, and its old readable C had agreed with it by
+        chance. ARM GCC -Os: the 12 functions with stack arguments, raw 115 -> 99, every function
+        readable as before. tests/test_tidy.py: sa0 and sa1 (whose address goes to a callee: kept).
+      - [ ] x86's pointers become word arrays, not structures: uxListRemove's sa0 is volatile u32 * with
+        sa0[1], sa0[2], sa0[4], where ARM's r0 is a struct s_15 * with r0->f_4, f_8, f_10 (x86 GCC -Os: 27
+        structures in 27 functions, 186 members; ARM: 50 in 119, 1040). Find which evidence dread.shapes
+        takes on ARM that x86's code does not give (the callers' arguments: x86 passes them through the
+        outgoing stack slots).
+      - [ ] The register parameter a regparm(1) function keeps (u32 uxListRemove(u32 eax_in, ...)): the
+        lifter hands eax in where regflow says the function reads it at its entry, and the readable C keeps
+        the parameter where the body never reads it, since dropping it would move the first stack
+        parameter into eax. Dropping it means compiling the function cdecl (regparm 0) and declaring it so
+        in every caller's file.
       - [x] A register a function hands back unchanged through a call (2026-10-27): EnableI2CController
         never writes ecx and calls GetI2CIoPortBaseAddress, which leaves it alone; its callers keep a
         value in ecx across it (GCC's -fipa-ra). At its call ecx held what its own caller left, and the

@@ -1232,6 +1232,54 @@ def frame_address(e):
     return False
 
 
+def _stack_word(e, names):
+    """The parameter of names that e reads or writes as a whole word through its address, the lifters'
+    *(volatile u32 *)((u32)&P) (or *(volatile u32 *)&P), else None."""
+    if not (isinstance(e, C.Unary) and e.op == "*" and isinstance(e.e, C.Cast)):
+        return None
+    if [w for w in e.e.type.split() if w not in ("volatile", "const")] != ["u32", "*"]:
+        return None
+    inner = e.e.e
+    if isinstance(inner, C.Cast) and inner.type == "u32":
+        inner = inner.e
+    if isinstance(inner, C.Unary) and inner.op == "&" and isinstance(inner.e, C.Name) and inner.e.id in names:
+        return inner.e.id
+    return None
+
+
+def stack_params(fn):
+    """A word parameter the function reads and writes only as a whole through its address is used as
+    itself: the lifters read a stack argument as *(volatile u32 *)((u32)&sa0), so that the C finds it
+    where the caller pushed it, and i386's cdecl passes every argument so (ARM its fifth and later):
+    no x86 parameter took a type or a structure (uxListRemove's list item stayed eax + 4, where ARM's
+    is r0->f_4). Only where every &P of the function is such an access: a walk from &P (a va_list) or
+    &P handed to a callee keeps them all. Returns whether it changed anything."""
+    words = {name for ptype, name in fn.params if ptype.strip() == "u32"}
+    if not words:
+        return False
+    taken, whole = {}, {}
+
+    def count(e):
+        if isinstance(e, C.Unary) and e.op == "&" and isinstance(e.e, C.Name) and e.e.id in words:
+            taken[e.e.id] = taken.get(e.e.id, 0) + 1
+        name = _stack_word(e, words)
+        if name is not None:
+            whole[name] = whole.get(name, 0) + 1
+        return e
+    for s in fn.body.body:
+        _map_statements(s, count)
+    plain = {name for name, n in whole.items() if taken.get(name) == n}
+    if not plain:
+        return False
+
+    def rewrite(e):
+        name = _stack_word(e, plain)
+        return C.Name(name) if name is not None else e
+    for s in fn.body.body:
+        _map_statements(s, rewrite)
+    return True
+
+
 def frame_stores(fn):
     """Stores into the function's own frame go when nothing can read them: no frame address leaves the
     function (sp0 appears only as the address of its own loads and stores: none is passed to a call,
@@ -4241,7 +4289,8 @@ def literals(fn):
     return changed
 
 
-PASSES = [("split", split), ("unvoid", unvoid), ("flatten", flatten), ("dead", dead), ("frame", frame_stores),
+PASSES = [("split", split), ("unvoid", unvoid), ("flatten", flatten), ("stack", stack_params), ("dead", dead),
+          ("frame", frame_stores),
           ("locals", frame_locals),
           ("propagate", propagate), ("steps", steps),
           ("selects", selects), ("merge", merge_ifs), ("chains", chains), ("fold", fold), ("arms", empty_arms), ("spread", spread),
