@@ -1,6 +1,6 @@
 """Every command's parser read without running the command (dread.cli parser), and its form (dread.cliforms):
 the fields, the options tied to a choice of another field, and the round trip of a form's values through
-the command line for every command, its subcommands and the command lines of the README."""
+the command line for every command, its subcommands and the command lines of docs/usage.md."""
 import argparse
 import os
 import shlex

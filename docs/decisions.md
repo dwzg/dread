@@ -5498,3 +5498,29 @@ added where they help, the user, 2026-10-21).
   (vQueueSetAccessQueueSetFromISR: not looked at yet). A target for another x86 board says what that
   board has there.
 
+## The README's status section is generated (2026-10-27)
+
+**Asked for by the user** ("Can we have an automatically generated status section in the readme
+about the status of dread and the progress of each architecture and feature of dread"; "Close to the
+top of the readme?"; "And also try to clean up the readme a bit. Move unnecessary info to separate
+docs. And keep the readme clean and nice."). How, **decided by recommendation**:
+
+- **What it is made from.** Only what the repository records, so that it says neither more nor less
+  than the repository and every checkout makes the same section: docs/todo.md's checkboxes (the
+  features: its sections with work left, the complete ones on one line; an architecture's progress:
+  its item or section), each gizmo build's tables (functions, and those built from lifted C), the
+  bench recipe (FreeRTOS builds per architecture), the commands (dread.cli) and the test functions.
+  Not the bench's measurements: they live outside the repository (~/dread-bench), and a section a
+  test checks cannot read them; committing a summary of them is a step of its own if wanted.
+- **How it stays current.** `bin/dread status --write` writes it between two markers;
+  tests/test_status.py fails when it differs, so a commit that ticks an item regenerates it (CLAUDE.md
+  says so). Not CI committing it: pushes go through the checked push alone.
+- **Where.** Right below the introduction, where the hand-written status was. That table's
+  descriptions moved to docs/features.md word for word (as a list), the command tour and setting up to
+  docs/usage.md, the browser view to docs/gui.md (with headings); the README keeps the introduction,
+  the status, a quick start with one picture, an index of the documentation, the layout, the plugin
+  and the licence: 131 lines from 328.
+- **Paused, planned, done.** The user pauses work in words ("Paused by the user on 2026-10-20"), so an
+  item or section whose own text says "paused" is shown paused; an unticked item with nothing under it
+  is planned; a ticked one, or a section with every checkbox ticked, is done.
+

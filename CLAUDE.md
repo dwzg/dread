@@ -57,7 +57,10 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
 - **The plan is `docs/todo.md`.** Start each item with `git pull --rebase --autostash`: the user may steer from
   anywhere by editing `docs/todo.md` on GitHub (answering a question, reordering). Take the first
   open item. Finish it with tests on every gizmo
-  build, tick it off in the same commit, push. Change the plan when the work shows a better one (an
+  build, tick it off in the same commit, push. README.md's status section is made from the ticks (and
+  from the gizmo builds' lift tables, the bench recipe, the commands and the tests' count): run
+  `bin/dread status --write` in the commit that changes them; tests/test_status.py fails on a stale
+  section (2026-10-27). Change the plan when the work shows a better one (an
   item is bigger than thought, a bug comes first, an approach turns out wrong): split, add, reorder or
   drop items, and say why in the commit message. Every few items, check with numbers (test times,
   coverage, what an item gained) whether the order still makes sense.

@@ -6785,6 +6785,11 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 
 ## Documentation and packaging
 
+- [x] **README's status section generated** (the user, 2026-10-27): `dread status` makes it from
+  docs/todo.md's checkboxes, the gizmo builds' tables, the bench recipe, the commands and the tests'
+  count, between two markers right below the introduction; tests/test_status.py fails on a stale one.
+  The README cleaned up with it: the old status table's descriptions in docs/features.md, the commands
+  and setting up in docs/usage.md, the browser view in docs/gui.md (docs/decisions.md).
 - [ ] A tutorial that takes gizmo from ELF to a rewritten, tested function, step by step.
 - [ ] A reference page per tool (from the docstrings, checked by a test that every command has one).
 - [ ] `pip install` from the repository works in a clean environment; version and changelog.
