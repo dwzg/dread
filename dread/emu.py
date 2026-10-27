@@ -28,8 +28,8 @@ import hashlib
 import struct
 
 from unicorn import (UC_ERR_FETCH_UNMAPPED, UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED, UC_HOOK_BLOCK,
-                     UC_HOOK_CODE, UC_HOOK_INTR, UC_HOOK_MEM_INVALID, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE,
-                     UC_MEM_WRITE, Uc, UcError)
+                     UC_HOOK_CODE, UC_HOOK_INSN, UC_HOOK_INTR, UC_HOOK_MEM_INVALID, UC_HOOK_MEM_READ,
+                     UC_HOOK_MEM_WRITE, UC_MEM_WRITE, Uc, UcError)
 
 from dread.arch import code_address
 from dread.util.perthread import PerThread
@@ -39,7 +39,7 @@ UNMAPPED = (UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED, UC_ERR_FETCH_UNMAPPED)
 PAGE = 0x1000
 POLL_LOGGED = 2     # reads after a Machine.poll_read stage's start that are still logged one by one
 IO_LOGGED = 100_000 # device accesses of one run logged one by one; later ones folded (the docstring)
-IO_EVENTS = ("io read", "io write")
+IO_EVENTS = ("io read", "io write", "port read", "port write")    # (port: x86's in and out, Machine._on_port_in)
 FOLD_CHUNK = 4096   # folded accesses hashed together (the digest is the same for the same accesses)
 POISON = 0xA5C3E100 # callee-saved registers start as POISON + 0x11 * (i + 1): no zero byte, so that
                     # a byte cleared in one of them shows
@@ -320,6 +320,10 @@ class Core:
             uc.hook_add(UC_HOOK_MEM_WRITE, self._on_write)
         for lo, hi in layout.io:
             uc.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, self._on_io, begin=lo, end=hi - 1)
+        ports = getattr(layout.arch, "port_instructions", None)
+        if ports:                           # (x86's in and out: a port space beside memory)
+            uc.hook_add(UC_HOOK_INSN, self._on_port_in, None, 1, 0, ports[0])     # (unicorn 2.1: aux1)
+            uc.hook_add(UC_HOOK_INSN, self._on_port_out, None, 1, 0, ports[1])
         # Every Machine's own two hooks, added once (Unicorn's binding takes about 20 us to add a
         # hook): they hand over to the Machine that runs. The fault hook is a memory hook and clears
         # a stale IT state behind it, as Machine.hook_add does.
@@ -353,6 +357,12 @@ class Core:
         self.machine._on_io(uc, access, addr, size, value, user)
         if self.layout.settle_it:
             self.layout.arch.settle_it(uc)
+
+    def _on_port_in(self, uc, port, size, user):
+        return self.machine._on_port_in(uc, port, size)
+
+    def _on_port_out(self, uc, port, size, value, user):
+        self.machine._on_port_out(uc, port, size, value)
 
     def page(self, number):
         """The initial contents of one page."""
@@ -476,6 +486,8 @@ class Machine:
         self.sysregs = {}           # {name: value} system registers set before each call (a case's sysregs)
         self.fault_at = None        # the instruction such an access ended the last call at
         self.io_fixed = None        # {byte address: value}: peripheral reads return these, see _on_io
+        self.ports = {}             # {port: value}: what x86's in reads there (a case's ports), see _on_port_in
+        self.port_reads = set()     # the ports the run read with in (dread.autocase takes them for inputs)
         self.polls = {}             # see poll_read()
         self.laters = {}            # see later_read()
         self.arg_domains = []       # [(register number, values)] applied by call()
@@ -602,6 +614,20 @@ class Machine:
         if self.unmapped is None:
             self.unmapped = (access, addr)
         return False                        # the access faults as before
+
+    def _on_port_in(self, uc, port, size):
+        """x86's in. The port space is no memory: a read returns the case's value for the port (ports,
+        cut to the access's size), 0 for any other port whatever was written there, and is logged in
+        order as a device access, as a peripheral register's read is (_on_io). Unicorn ran in as 0
+        and out as nothing, unlogged, until 2026-10-27."""
+        value = self.ports.get(port, 0) & ((1 << 8 * size) - 1)
+        self.port_reads.add(port)
+        self.log("port read", port, size, value)
+        return value
+
+    def _on_port_out(self, uc, port, size, value):
+        """x86's out: logged in order as a device access (_on_io's io write)."""
+        self.log("port write", port, size, value & ((1 << 8 * size) - 1))
 
     def poll_read(self, addr, n, value):
         """From the n-th read (1 is the first) of the register at addr on, until a later stage,

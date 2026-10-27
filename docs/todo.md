@@ -6556,8 +6556,17 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         C's stack parameters lie in the caller's words one after another, as cdecl puts them, and GCC and
         clang keep a parameter whose address is taken in its slot, so a walk on from it reads what the
         caller pushed. printf, g_printf and g_printf_rcc pass the lift check (tests/test_x86.py: total).
-      - [ ] Pushes of every register, iret, in and out, rdtsc (the port's assembly and the support code:
-        refused, rightly for now).
+      - [x] in and out (2026-10-27): a port space beside memory. dread.emu hooks them (the layer's
+        port_instructions) and logs every access in order as a device access (port read, port write);
+        a case's ports answer in (0 at any other port; formats.md), and the generator takes the ports a
+        run read for inputs of later cases; the lifter writes dread.h's dread_inN and dread_outN, inline
+        assembly of the instruction itself, which the emulator runs and logs as it does the original's.
+        Unicorn had run in as 0 and out as nothing, unlogged. On the trial build the demo's inb ... outl
+        and pciIOread32 pass; an x86 string instruction no longer reads the flags (the direction flag
+        alone, which the ABI keeps clear: rep movsl two calls up made inl hand its flags back; regflow
+        VERSION 32). tests/test_x86.py: kbd polls a status port and reads the data port.
+      - [ ] Pushes of every register, iret, rdtsc (the port's assembly and the support code: refused,
+        rightly for now).
       - [x] Three of the trial build's disagreements traced to their cause (2026-10-27): (1) GCC 16
         reorders two volatile loads: mov eax, [ebx + 0x38]; cmp [ebx + 0x3c], eax lifted, combine folds
         the later load into the compare and then the earlier one too (cmp mem, mem matches i386's pattern

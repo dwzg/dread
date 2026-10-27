@@ -610,6 +610,7 @@ class Generator:
         first arguments go to (its regs: case_regs), which the machine's next call takes."""
         lay = self.layout
         m.call_regs = case.get("regs")
+        m.ports = {p: v for p, _, v in case.get("ports", ())}     # (x86's in: dread.emu's port space)
         for base, size in case.get("map", ()):     # pages of its own, before its memory (a page its run
             m.map_page(base, size)                  # faulted at: Generator.answers' behind)
         fixed = {} if case.get("io") == "fixed" else None
@@ -1319,6 +1320,7 @@ class Generator:
         words_set = set(words)
         nregs = self.arg_count(entry)       # (the argument registers, then the stack arguments)
         case_regs = self.case_regs(entry)   # (x86: eax, edx and ecx where the function takes them)
+        seen_ports = set()                  # (x86: the ports runs read with in: inputs of later cases)
         fregs = self.fp_inputs(name)        # float arguments in the FPU's registers (hard float)
 
         def buffer_for(slot):
@@ -1451,6 +1453,7 @@ class Generator:
             case = {"args": [small_value() if small[0] else value() for _ in range(nregs)],
                     **({"regs": list(case_regs)} if case_regs is not None else {}),
                     "mem": [[a, s, value()] for a, s in sorted(known.items())],
+                    **({"ports": [[p, 4, value()] for p in sorted(seen_ports)]} if seen_ports else {}),
                     "returns": [value() for _ in range(8)] if calls else [], "calls": [list(c) for c in calls],
                     **({"fregs": list(fregs), "fargs": [fvalue() for _ in fregs]} if fregs else {}),
                     "frame": frame, **({"io": "fixed"} if self.io_fixed else {}), **({"limit": self.long} if self.long else {}),
@@ -1486,7 +1489,10 @@ class Generator:
             self.apply(m, case)
             m.cover(start, end)
             m.trace_reads(image.base, image.end, self.code, self.owners)
-            m.call(entry, *case["args"], max_instructions=max_instructions, stall=self.stall_for(max_instructions))
+            try:
+                m.call(entry, *case["args"], max_instructions=max_instructions, stall=self.stall_for(max_instructions))
+            finally:
+                seen_ports.update(m.port_reads)
             if self.loop and self.ends_badly(m):
                 raise EmuError("a loop case ended neither at a stub call nor by a return")
             return m
@@ -1546,6 +1552,9 @@ class Generator:
                     case.update({"hang": True, "limit": limit, "stops": sorted(hung)})     # (see fresh)
                 present = {a for a, _, _ in case["mem"]}
                 case["mem"] += [[a, s, value()] for a, s in sorted(known.items()) if a not in present]
+                given = {p for p, _, _ in case.get("ports", ())}
+                if seen_ports - given:      # (ports a run read since the case was made)
+                    case["ports"] = case.get("ports", []) + [[p, 4, value()] for p in sorted(seen_ports - given)]
                 texts = buffers(case) if strings or chars else ()
                 if texts and rng.random() < TEXT_MUTATE:
                     buffer = rng.choice(texts)
@@ -1554,12 +1563,13 @@ class Generator:
                     for _ in range(rng.choice((1, 1, 2, 3))):
                         slots = [("args", i) for i in range(nregs)] + [("mem", i) for i in range(len(case["mem"]))] \
                             + [("returns", i) for i in range(len(case["returns"]))] \
-                            + [("fargs", i) for i in range(len(case.get("fargs", ())))]
+                            + [("fargs", i) for i in range(len(case.get("fargs", ())))] \
+                            + [("ports", i) for i in range(len(case.get("ports", ())))]
                         if not slots:       # (nothing to vary: no argument, no load, no call; a cdecl function
                             break           # without stack arguments, gizmo-i386's uart_init)
                         kind, i = rng.choice(slots)
-                        if kind == "mem":
-                            case["mem"][i][2] = value()
+                        if kind in ("mem", "ports"):
+                            case[kind][i][2] = value()
                         else:
                             case[kind][i] = any_value(kind)
                 if pin_args or pin_mem or data_args or data_mem:
@@ -1584,6 +1594,7 @@ class Generator:
             try:
                 m.call(entry, *case["args"], max_instructions=limit, stall=self.stall_for(limit))
             except EmuError:
+                seen_ports.update(m.port_reads)
                 if m.self_loop is not None and self.program.function_at(m.self_loop) is self.program.by_entry.get(entry):
                     # It came to a loop of its own that nothing leaves (for (;;); behind an error): there
                     # it has done all it does, in both images alike, so the run is a "hang" case,
@@ -1655,6 +1666,7 @@ class Generator:
                             continue
                         known.add(a, n)
                 continue
+            seen_ports.update(m.port_reads)
             if m.spinning:                      # (a case that ends at a call came back spinning: the
                 spins.setdefault(m.spinning[0], m.spinning[1:])     # next inputs get a poll stage)
             if self.touches_image(m) or (self.loop and self.ends_badly(m)):

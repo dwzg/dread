@@ -813,6 +813,79 @@ def test_a_string_copy_through_the_frame_keeps_it(tmp_path):
     assert lift.check(target, image, ["init"], out=lines.append, jobs=2) == ["init"], lines
 
 
+PORTS_C = r"""
+typedef unsigned int u32;
+typedef unsigned char u8;
+volatile u32 sink[4];
+
+static inline u8 inb_(unsigned short port)
+{
+    u8 v;
+    __asm__ volatile ("inb %w1, %0" : "=a"(v) : "Nd"(port));
+    return v;
+}
+
+static inline void outb_(unsigned short port, u8 v)
+{
+    __asm__ volatile ("outb %0, %w1" : : "a"(v), "Nd"(port));
+}
+
+u32 kbd(u32 n)
+{
+    u32 got = 0, i;
+    outb_(0x64, 0xad);
+    for (i = 0; i < n && i < 4; i++) {
+        if (inb_(0x64) & 1)
+            got += inb_(0x60);
+        else
+            got ^= 0x5a;
+    }
+    sink[0] = got;
+    return got;
+}
+
+void _start(void)
+{
+    sink[1] = kbd(3);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_port_io_is_logged_answered_and_lifted(tmp_path):
+    """in and out: the emulator logs them in order as device accesses (port read, port write) and a
+    case's ports answer in (0 elsewhere); the generator takes the ports a run read for inputs, so kbd's
+    cases reach both arms of its status bit; the lifter writes dread.h's dread_in8 and dread_out8,
+    which run the instructions themselves, and kbd passes its lift check. Unicorn ran in as 0 and out
+    as nothing, unlogged, and the lifter refused both."""
+    target = small_i386(tmp_path, PORTS_C, "ports")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    import json
+    from dread import lift, regflow
+    from dread.autocase import Generator
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    kbd = program.by_name["kbd"]
+    gen = Generator(target, image)
+    m = gen.machine()
+    m.plan = []
+    gen.apply(m, {"args": [2], "mem": [], "returns": [], "calls": [], "frame": 0, "ports": [[0x64, 4, 1], [0x60, 4, 7]]})
+    m.call(kbd.entry, 2, max_instructions=20000)
+    events = [list(e) for e in m.calls if e[0] in ("port read", "port write")]
+    assert events[:3] == [["port write", 0x64, 1, 0xad], ["port read", 0x64, 1, 1], ["port read", 0x60, 1, 7]], events
+    text = lift.make_lifter(program, regflow.load(target, image, program)).lift(kbd).text
+    assert "dread_out8(" in text and "dread_in8(" in text, text
+    lines = []
+    assert lift.check(target, image, ["kbd"], out=lines.append, jobs=2) == ["kbd"], lines
+    with open(os.path.join(target.build, "autocases", image.name, "kbd.json")) as f:
+        cases = json.load(f)["cases"]
+    status = {v & 1 for c in cases for p, _, v in c.get("ports", ()) if p == 0x64}
+    assert status == {0, 1}, cases
+
+
 PICK_C = r"""
 typedef unsigned int u32;
 volatile u32 sink[4];

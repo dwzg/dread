@@ -173,4 +173,21 @@ typedef signed long long s64;
     DREAD_EACH(DREAD_BACK, __VA_ARGS__) } while (0)
 #endif
 
+#if defined(__i386__)
+/* x86's port space (in and out, dread.lift_x86): the instruction itself, which the emulator logs as it
+   logs the original's (dread.emu: port read, port write); a port below 256 takes the immediate form */
+#define DREAD_PORT_IN(name, type, insn) \
+    static inline __attribute__((always_inline)) u32 name(u32 port) \
+    { type v; __asm__ volatile (insn " %w1, %0" : "=a"(v) : "Nd"((u16)port) : "memory"); return v; }
+#define DREAD_PORT_OUT(name, type, insn) \
+    static inline __attribute__((always_inline)) void name(u32 port, u32 value) \
+    { __asm__ volatile (insn " %0, %w1" : : "a"((type)value), "Nd"((u16)port) : "memory"); }
+DREAD_PORT_IN(dread_in8, u8, "inb")
+DREAD_PORT_IN(dread_in16, u16, "inw")
+DREAD_PORT_IN(dread_in32, u32, "inl")
+DREAD_PORT_OUT(dread_out8, u8, "outb")
+DREAD_PORT_OUT(dread_out16, u16, "outw")
+DREAD_PORT_OUT(dread_out32, u32, "outl")
+#endif
+
 #endif

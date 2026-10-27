@@ -86,7 +86,7 @@ SHIFTS = ("shl", "sal", "shr", "sar", "rol", "ror")
 MASKS = {1: 0xFF, 2: 0xFFFF, 4: M32}
 UTYPES = {1: "u8", 2: "u16", 4: "u32"}
 STYPES = {1: "s8", 2: "s16", 4: "s32"}
-REFUSED = {"std": "sets the direction flag", "in": "reads a port", "out": "writes a port",
+REFUSED = {"std": "sets the direction flag",
            "lahf": "reads the flags register", "sahf": "writes the flags register",
            "pushfd": "pushes the flags register", "popfd": "pops into the flags register",
            "int3": "is a breakpoint", "ud2": "is an undefined instruction", "hlt": "halts", "iretd": "returns from an "
@@ -903,6 +903,21 @@ class X86Lifter(lift.Lifter):
             if lane is not None and lane[0] != "sp":
                 loaded.add(lane[0])
 
+    def _port(self, insn):
+        """in and out: dread.h's dread_inN and dread_outN, inline assembly of the instruction itself, which
+        the emulator runs and logs as it does the original's (dread.emu's port space: a case's ports
+        answer in). The port is the immediate or dx."""
+        ops = insn.operands
+        reg, port = (ops[0], ops[1]) if insn.mnemonic == "in" else (ops[1], ops[0])
+        if port.type == X.X86_OP_IMM:
+            where = "0x%xu" % (port.imm & 0xFF)
+        else:
+            where = self._value(insn, port)     # (dx: its 16 bits)
+        bits = 8 * reg.size
+        if insn.mnemonic == "in":
+            return self._write(insn, reg, "dread_in%d(%s)" % (bits, where))
+        return "dread_out%d(%s, %s);" % (bits, where, self._value(insn, reg))
+
     def _insn(self, insn):
         self.insn_now = insn
         m, ops, a = insn.mnemonic, insn.operands, insn.address
@@ -914,6 +929,8 @@ class X86Lifter(lift.Lifter):
             raise Refused("0x%x: %s with a prefix (lock, rep) is not modelled" % (a, m))
         if m == "int":
             return self._int(insn)
+        if m in ("in", "out"):
+            return self._port(insn)
         if m in REFUSED:
             raise Refused("0x%x %s" % (a, REFUSED[m]))
         if m in NOPS:

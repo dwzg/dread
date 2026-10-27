@@ -75,14 +75,16 @@ class X86:
     default_callee_saved = ("ebx", "esi", "edi", "ebp")
     default_result = ("eax", "edx")
     profile = None
+    port_instructions = (UX.UC_X86_INS_IN, UX.UC_X86_INS_OUT)    # in and out: dread.emu's port space
     pushes_arguments = True                 # cdecl pushes a call's stack arguments (dread.regflow: such a
                                             # push reads its register)
     entry_stack_args = 4                    # sp to the first stack argument at a function's entry: the
                                             # return address the call pushed lies between
     veneer_reg = "eax"                      # no veneers (a 5-byte jmp reaches every address); eax is where
                                             # GCC and clang mostly load a pointer they call through
-    generator_version = 3           # 2: a case gives eax, edx and ecx to a function that takes them (case_regs);
-                                    # 3: one that only pushes edx or ecx as a call's argument takes them
+    generator_version = 4           # 2: a case gives eax, edx and ecx to a function that takes them (case_regs);
+                                    # 3: one that only pushes edx or ecx as a call's argument takes them;
+                                    # 4: a case answers the ports its runs read (ports)
     refine_saved_writes = True              # dread.regflow refines a write of ebx, esi, edi or ebp too (taken as
                                             # all used): with three scratch registers, bytes pass through them
     SWITCH_MAX = 1024                       # table entries read at most
@@ -292,6 +294,13 @@ class X86:
             reads.add(self._name(insn.reg_name(insn.operands[0].reg)))     # (kept where the condition fails)
         if insn.mnemonic in ("cdq", "cwd"):
             writes.discard("eax")           # (capstone 5 lists eax: they write edx alone, the sign of eax)
+        m = insn.mnemonic.split()[-1]       # (rep movsd: capstone's mnemonic carries the prefix)
+        if m[:4] in ("movs", "stos", "lods", "scas", "cmps", "outs") or m[:3] == "ins" and len(m) == 4:
+            # a string instruction reads the direction flag alone, which the ABI keeps clear (cld is a
+            # nop to the lifter, std refused): no read of the flags a call left. Counted, regflow took
+            # the flags that FreeRTOS's inl left (its xor eax, eax) for a result: a rep movsl two calls
+            # up read them, through pciIOread32 and outl, which write none
+            reads.discard("flags")
         reads.discard("pc")
         writes.discard("pc")
         return reads, writes

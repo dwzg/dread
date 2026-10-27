@@ -42,7 +42,7 @@ run executes like the rest of the startup.
 Each case calls one function in both images with the same registers and memory. They must agree on
 the return value, the callee-saved registers, the scratch registers callers read after the call
 (section 7), every byte written outside the stack and the device log (every peripheral access in
-order). And the cases together must run every instruction of the original function, or the function
+order, x86's in and out to its port space among them). And the cases together must run every instruction of the original function, or the function
 is UNCOVERED; code no input can reach is declared with the reason. A case whose images differ is run
 once more on the original with the stack starting lower: if the original's own outcome changes, it
 took a stack address for a value (a random generator seeded with the address of a local, a pointer

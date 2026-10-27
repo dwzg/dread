@@ -339,7 +339,7 @@ def observe(gen, fn, case, flow=None, named=None, index=0, has_callers=True):
                 break
     own = {e[1] for i, e in enumerate(result.calls[:len(marks)]) if marks[i] and e and e[0] == "io read"}
     kept = [(i, e) for i, e in enumerate(result.calls)
-            if e and e[0] in ("io read", "io write", "svc") and i < len(marks) and marks[i]
+            if e and e[0] in ("io read", "io write", "port read", "port write", "svc") and i < len(marks) and marks[i]
             or e and e[0] == "io poll reads" and e[1] in own]      # (counted after the run: its reads say whose)
     # The text an argument points to is shown when the run read it as text (its first byte as a
     # byte, here or in a callee): the generator puts texts into buffers it learned, structures too,
@@ -458,6 +458,9 @@ def io_text(event, places, vary=False):
         return "svc"
     if kind == "io poll reads":
         return "read %s %d times (a wait)" % (places.name(address, "u32"), event[2])
+    if kind in ("port read", "port write"):     # (x86's in and out: a port, no address)
+        value = "x" if vary else number(event[3])
+        return ("in port 0x%x = %s" if kind == "port read" else "out port 0x%x = %s") % (address, value)
     name = places.name(address, CTYPES.get(event[2], "u32"))
     value = "x" if vary else number(event[3])
     return "read %s = %s" % (name, value) if kind == "io read" else "%s = %s" % (name, value)
@@ -471,7 +474,8 @@ def slots(item, places):
     """{template: value} of the ways one value of an event can vary while the rest stays: a device
     access's value, a call's one argument (no texts among them) or its result."""
     if isinstance(item, tuple):
-        return {io_text(item, places, True): item[3]} if item[0] in ("io read", "io write") else {}
+        return {io_text(item, places, True): item[3]} if item[0] in ("io read", "io write", "port read",
+                                                                     "port write") else {}
     out = {}
     if not any(t for v, t in zip(item["args"], item["texts"]) if places.base_of(v) is None):
         for k, v in enumerate(item["args"]):
