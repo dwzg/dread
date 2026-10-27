@@ -27,8 +27,11 @@ stay where cdecl has them, so that original callers and callees keep theirs; an 
 would not survive dread.readable, which writes heads anew), since a function that does not write eax
 hands its caller's eax back,
 and the cases compare a void function's result register too (gizmo's uart_init: one store and ret). A
-call takes eax, or eax and edx where the callers read a 64-bit result (dread.regflow); ecx, edx (or
-ecx alone) and the flags are 0 behind it. A call through a register or memory passes the lowest
+function that reads edx or ecx at its entry takes eax, edx and ecx (GCC's local regparm(3) for a
+static function whose address is not taken, LLVM's fastcc: reg_args): its file says regparm 3, and a
+declaration of a callee of the other convention says its own (an attribute in a declaration, which
+the readable passes keep). A call takes eax, or eax and edx where the callers read a 64-bit result
+(dread.regflow); ecx, edx (or ecx alone) and the flags are 0 behind it. A call through a register or memory passes the lowest
 frame words (dread.lift.INDIRECT_STACK_WORDS).
 
 Refused, with the reason: a write of esp that is not a frame adjustment the analysis follows (and esp:
@@ -60,6 +63,8 @@ REGS = ["eax", "ecx", "edx", "ebx", "esi", "edi", "ebp"]
 # that does not write eax returns what its caller left there, which the cases compare (a void
 # function's result register too)
 ARGS = ("eax",)
+REGPARM3 = ("eax", "edx", "ecx")            # a function that reads edx or ecx at its entry takes all three
+                                            # (GCC's local regparm(3), LLVM's fastcc: ecx and edx; reg_args)
 SCRATCH = ("eax", "ecx", "edx")
 AFTER_CALL = set(SCRATCH) | {"flags"}
 RESULTS = {1: ("eax",), 2: ("eax", "edx")}
@@ -266,11 +271,43 @@ class X86Lifter(lift.Lifter):
             insn.address, insn.mnemonic, insn.op_str))
 
     def entry_states(self, fn, given=frozenset()):
-        """dread.lift's, without a register an instruction reads only to keep the bits outside the part it
-        writes (the layer's merge_only: mov bl, cl; mov dl, byte ptr [eax]) where dread.regflow does not
-        follow it (ebx, esi, edi, ebp) or finds no bit of it read at the entry: the C's register starts
-        at 0 there, and those bits are what nothing uses (regflow's bits), or what the cases see used
-        (they poison what the caller leaves in each register)."""
+        """dread.lift's (_entry_reads), with the function's own register arguments (reg_args) written at
+        its entry."""
+        return self._entry_reads(fn, frozenset(given) | frozenset(self.reg_args(fn)))
+
+    def reg_args(self, fn):
+        """The registers fn takes its first arguments in: eax alone (cdecl; the C hands it in and on with
+        regparm(1)), or eax, edx and ecx where fn reads edx or ecx before anything writes them: GCC gives
+        a static function whose address is not taken its first three arguments in eax, edx and ecx
+        (regparm(3): FreeRTOS's prvAddCurrentTaskToDelayedList(eax, edx)), LLVM's fastcc the first two in
+        ecx and edx, and the C's regparm(3) puts each register where the original has it either way."""
+        key = getattr(fn, "key", fn.name)
+        cache = self.__dict__.setdefault("_reg_args", {})
+        if key not in cache:
+            cache[key] = ARGS                   # (a recursive look takes eax alone)
+            try:
+                found = self._entry_reads(fn, frozenset())[1]
+            except Refused:
+                found = {}
+            reads = set().union(*found.values()) if found else set()
+            cache[key] = REGPARM3 if reads & {"edx", "ecx"} else ARGS
+        return cache[key]
+
+    def regparm_of(self, fn):
+        """The -mregparm of fn's C (dread.build's REGPARM line): 1, or 3 for one that takes edx and ecx."""
+        return len(self.reg_args(fn))
+
+    def leaves(self, fn):
+        """The registers fn reads that its caller leaves, beyond its register arguments."""
+        found = self.entry_states(fn)[1]
+        return sorted(set().union(*found.values()) - set(self.reg_args(fn))) if found else []
+
+    def _entry_reads(self, fn, given):
+        """dread.lift's entry_states, without a register an instruction reads only to keep the bits outside
+        the part it writes (the layer's merge_only: mov bl, cl; mov dl, byte ptr [eax]) where dread.regflow
+        does not follow it (ebx, esi, edi, ebp) or finds no bit of it read at the entry: the C's register
+        starts at 0 there, and those bits are what nothing uses (regflow's bits), or what the cases see
+        used (they poison what the caller leaves in each register)."""
         undef, found = super().entry_states(fn, given)
         if not found:
             return undef, found
@@ -514,7 +551,7 @@ class X86Lifter(lift.Lifter):
         elif kind == "jump" and not falls and target is not None and target not in own:
             callee = self.prog.by_entry.get(target)
         if kind in ("call", "icall"):
-            fx.hands |= self._takes_eax(callee) | (set(self.leaves(callee)) if callee is not None else set())
+            fx.hands |= self._takes(callee) | (set(self.leaves(callee)) if callee is not None else set())
             n = (self.call_words(fn, insn, callee) or 0) if callee is not None else min(depth // 4, INDIRECT_STACK_WORDS)
             fx.words += [(4 * k, 4) for k in range(n) if 4 * k < depth]   # (_call, _icall)
             fx.writes |= set(self.after_call(insn))
@@ -522,7 +559,7 @@ class X86Lifter(lift.Lifter):
         elif kind == "return":
             fx.hands |= set(results)
         elif callee is not None:
-            fx.hands |= self._takes_eax(callee) | set(self.leaves(callee))       # a tail call
+            fx.hands |= self._takes(callee) | set(self.leaves(callee))           # a tail call
         elif kind == "ijump":
             fx.hands |= set(reads) - {"sp"}
         return fx
@@ -532,18 +569,24 @@ class X86Lifter(lift.Lifter):
         (dread.regflow: one that hands it back as its result unwritten), or one not known; else nothing
         (the C passes eax all the same, which the callee does not read: GCC's pop eax that takes an
         argument off again before the next call is dead)."""
+        return self._takes(callee) & set(ARGS)
+
+    def _takes(self, callee):
+        """The register arguments a call hands on in a way that matters: those of the callee's reg_args it
+        reads at its entry (all of them for one not known)."""
         if callee is None or not self.flow:
             return set(ARGS)
-        return set(ARGS) & set(self.flow.read_regs(callee.name))
+        return set(self.reg_args(callee)) & set(self.flow.read_regs(callee.name))
 
     def c_uses(self, fn, insn, values, results, mirror, own):
         """dread.lift's, with a call (or a tail call) reading eax only where its callee takes it
-        (_takes_eax)."""
+        (_takes_eax), and edx and ecx where it takes them (a regparm(3) callee: _takes)."""
         reads, kills, ends = super().c_uses(fn, insn, values, results, mirror, own)
         kind, target, falls = self.arch.flow(insn)
-        if kind in ("call", "jump") and isinstance(target, int) and "eax" in reads:
-            callee = self.prog.by_entry.get(target)
-            if callee is not None and not self._takes_eax(callee) and "eax" not in self.leaves(callee) \
+        callee = self.prog.by_entry.get(target) if kind in ("call", "jump") and isinstance(target, int) else None
+        if callee is not None and (kind == "call" or callee.entry not in own):
+            reads = set(reads) | (self._takes(callee) - set(ARGS))
+            if "eax" in reads and not self._takes_eax(callee) and "eax" not in self.leaves(callee) \
                     and "eax" not in self.arch.reg_effects(insn)[0]:
                 reads = set(reads) - {"eax"}
         return reads, kills, ends
@@ -1060,8 +1103,9 @@ class X86Lifter(lift.Lifter):
             if back is not None:
                 raise Refused("0x%x reads a stack word that the call at 0x%x passed to %s, which may change it "
                               "(the C passed a copy)" % (back, insn.address, callee.name))
-        self.ctx["callees"].add((callee.name, -1 if variadic else nstack, width))
-        call = "%s(%s)" % (callee.name, ", ".join(([] if variadic else ["eax"]) + words))
+        regs = [] if variadic else list(self.reg_args(callee))
+        self.ctx["callees"].add((callee.name, -1 if variadic else nstack, width, len(regs)))
+        call = "%s(%s)" % (callee.name, ", ".join(regs + words))
         keep = set(self.flow.preserved_regs(callee.name)) if self.flow else set()
         scratch = [r for r in ("ecx", "edx") if r not in RESULTS[width] and r not in keep]
         clear = ("%s = 0; " % " = ".join(scratch) if scratch else "") + "cf = zf = sf = of = 0;"
@@ -1148,17 +1192,21 @@ class X86Lifter(lift.Lifter):
         ctx = self.ctx
         lines = ["/* %s at 0x%x, lifted by dread lift: one statement per instruction. */" % (fn.name, fn.entry),
                  '#include "dread.h"']
-        widest, words = {}, {}
-        for name, nstack, width in ctx["callees"]:       # one declaration: the widest of its calls
+        widest, words, nregs = {}, {}, {}
+        for name, nstack, width, regs in ctx["callees"]:     # one declaration: the widest of its calls
             widest[name] = max(widest.get(name, 1), width)
-            words[name] = nstack
+            words[name], nregs[name] = nstack, regs
+        own = self.reg_args(fn)
         for name, width in sorted(widest.items()):
-            params = "u32, ..." if words[name] < 0 else ", ".join(["u32"] * (1 + words[name]))
-            lines.append("extern %s %s(%s);" % (CTYPES[width], name, params))
-        params = ["u32 eax_in"] + ["u32 sa%d" % k for k in range(ctx["stack_params"])]
+            params = "u32, ..." if words[name] < 0 else ", ".join(["u32"] * (nregs[name] + words[name]))
+            # a callee of another convention than the file's (its REGPARM line) says its own
+            convention = "" if words[name] < 0 or nregs[name] == len(own) else \
+                " __attribute__((regparm(%d)))" % nregs[name]
+            lines.append("extern %s %s(%s)%s;" % (CTYPES[width], name, params, convention))
+        params = ["u32 %s_in" % r for r in own] + ["u32 sa%d" % k for k in range(ctx["stack_params"])]
         lines.append("%s %s(%s)" % (CTYPES[self._width(fn.name)], fn.name, ", ".join(params)))
         lines.append("{")
-        lines.append("    u32 %s;" % ", ".join("%s = %s" % (r, "eax_in" if r == "eax" else "0") for r in REGS))
+        lines.append("    u32 %s;" % ", ".join("%s = %s" % (r, r + "_in" if r in own else "0") for r in REGS))
         lines.append("    u32 cf = 0, zf = 0, sf = 0, of = 0, s0 = 0, d0 = 0, e0 = 0, a0 = 0, k0 = 0;")
         if ctx["switch"]:
             lines.append("    u32 index = 0;")

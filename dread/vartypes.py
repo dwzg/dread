@@ -1818,7 +1818,8 @@ def plan(p, trees, digests=None, context=None):
 
 # --- applying the plan to a function's readable C ---
 
-EXTERN = re.compile(r"^extern (.+?)\b(\w+)\((.*)\);$", re.S)
+EXTERN = re.compile(r"^extern (?!.*__attribute__)(.+?)\b(\w+)\((.*)\);$", re.S)    # (one that says its
+                                                        # convention, x86's regparm(3): as the lifter wrote it)
 
 
 def _named_structs(text, names):

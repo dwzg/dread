@@ -320,8 +320,9 @@ def lift_sources(target, image, names, outdir, quiet=False, lifter=None, src_cal
             if transform is not None:
                 text = transform(name, text) or text
             saved = lifter.call_saved(fn)
-            regparm = getattr(lifter, "regparm", 0)
-            if regparm:                     # (compile_all reads it: -mregparm=N)
+            regparm = lifter.regparm_of(fn) if hasattr(lifter, "regparm_of") else getattr(lifter, "regparm", 0)
+            if regparm:                     # (compile_all reads it: -mregparm=N; x86: 1, or 3 for a function
+                                            # that takes edx and ecx too)
                 text = "%s%d */\n%s" % (REGPARM, regparm, text)
             handed = getattr(result, "handed", None)
             if handed:                      # (compile_all reads it: GCC's -ffixed-REG)

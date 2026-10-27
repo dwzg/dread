@@ -156,7 +156,8 @@ class Types:
             m = re.match(r"^#define (\w+) \(\((.+?)\)(0x[0-9a-fA-F]+)[uUlL]*\)$", line)
             if m:                           # (an array of static data: its macro is the pointer)
                 self.macros[m.group(1)] = (self.parse(m.group(2)), None)
-        m = re.match(r"^extern (.+?)\b(\w+)\((.*)\);$", text.strip(), re.S)
+        bare = re.sub(r"\s*__attribute__\(\(regparm\(\d+\)\)\)(?=;$)", "", text.strip())  # (x86's convention)
+        m = re.match(r"^extern (.+?)\b(\w+)\((.*)\);$", bare, re.S)
         if m:
             params = [p.strip() for p in m.group(3).split(",")] if m.group(3).strip() not in ("", "void") else []
             self.functions[m.group(2)] = (self.parse(m.group(1)), None if "..." in params else

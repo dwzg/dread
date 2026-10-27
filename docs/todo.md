@@ -6497,11 +6497,22 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
       build without the sparse paths (docs/decisions.md). Not measured yet (lift, readable): next.
     - [ ] The lift check with room (.data moved 256 KiB away): 102 of 293 accepted, 109 refused, 82
       dropped. What it showed, largest first:
-      - [ ] GCC's local calling convention: a static function whose address is not taken gets its first
-        three arguments in eax, edx and ecx (regparm(3)), prvAddCurrentTaskToDelayedList(eax, edx) say;
-        the lifter takes eax alone and refuses those that read edx or ecx (15) and their callers (about
-        25). Each lifted file has one convention (dread.build's REGPARM line): one with regparm(3) for
-        such a function, and its callees' declarations their own.
+      - [x] GCC's local calling convention (2026-10-27): a static function whose address is not taken
+        gets its first three arguments in eax, edx and ecx (regparm(3)), prvAddCurrentTaskToDelayedList(eax,
+        edx) say; the lifter took eax alone and refused those that read edx or ecx (15) and their callers
+        (about 25). A function that reads edx or ecx at its entry takes all three now (X86Lifter.reg_args;
+        LLVM's fastcc, ecx and edx, lands in its registers the same way): its file's REGPARM line says 3,
+        its head takes eax_in, edx_in and ecx_in, and a declaration of a callee whose convention is not
+        its file's says its own (__attribute__((regparm(N)))), which the readable passes keep (the types
+        pass and polish leave such a declaration as it is, dread.shapes carries the attribute along).
+        tests/test_x86.py: a static mix(a, b, c) and its caller pass the lift check and the readable gate,
+        which reads return mix(esi, 7, edi) + s0.
+      - [ ] Generated cases give a regparm(3) function no register argument: x86's ABI has no argument
+        registers, so a case's arguments are stack words (Machine.call), and its eax, edx and ecx are
+        what the harness leaves; its callers vary them through their own arguments. Written cases give C
+        arguments, which Machine.call places by the ABI. Each function's convention as a fact the
+        emulator knows (the register flow's, which the generator and the runner both load) would let a
+        case put the leading arguments where the function takes them.
       - [x] Calls of a variadic function (2026-10-27): the words a call passes came from the callee's
         stack analysis, which for printf sees the format alone; the original pushes the format, the file
         and the line, the C passed one word, printf read a file name from elsewhere and prints faulted

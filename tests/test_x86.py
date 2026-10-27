@@ -330,6 +330,64 @@ def test_a_call_of_a_variadic_function_passes_what_the_call_site_stored(tmp_path
                for line in calls), calls
 
 
+REGPARM_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+
+static __attribute__((noinline)) u32 mix(u32 a, u32 b, u32 c)
+{
+    sink[2] = c;
+    return a * 3 + (b ^ c);
+}
+
+u32 user(u32 x, u32 y)
+{
+    return mix(x, y, x + y) + mix(y, 7, x);
+}
+
+void _start(void)
+{
+    sink[1] = user(1, 2);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_static_function_takes_its_arguments_in_registers(tmp_path):
+    """GCC gives a static function whose address is not taken its first three arguments in eax, edx and
+    ecx (its local regparm(3)): mix's C takes all three (the file's REGPARM line says 3), user's C,
+    compiled with regparm 1 as cdecl's, declares mix with its convention and hands it eax, edx and ecx,
+    and both agree with the original and pass the readable gate, whose passes keep the declaration's
+    attribute. Until then mix was refused for reading edx before anything wrote it, and user for
+    calling it."""
+    target = small_i386(tmp_path, REGPARM_C, "regparm")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import build, lift, readable, regflow
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    mix, user = program.by_name["mix"], program.by_name["user"]
+    if lifter.reg_args(mix) != ("eax", "edx", "ecx"):
+        pytest.skip("this GCC did not give mix its arguments in registers")
+    assert lifter.reg_args(user) == ("eax",) and lifter.regparm_of(mix) == 3
+    text = lifter.lift(mix).text
+    assert "u32 mix(u32 eax_in, u32 edx_in, u32 ecx_in)" in text, text
+    text = lifter.lift(user).text
+    assert "extern u32 mix(u32, u32, u32) __attribute__((regparm(3)));" in text, text
+    assert "= mix(eax, edx, ecx);" in text, text
+    lines = []
+    assert sorted(lift.check(target, image, ["mix", "user"], out=lines.append, jobs=2)) == ["mix", "user"], lines
+    lines = []
+    assert sorted(readable.check(target, image, out=lines.append, jobs=2)) == ["mix", "user"], lines
+    out = tmp_path / "readable"
+    assert readable.main(["--target", str(tmp_path / "regparm"), "--out", str(out), "user"]) == 0
+    assert "__attribute__((regparm(3)))" in (out / "user.c").read_text()
+    assert build.REGPARM + "3 */" in "".join(open(p).read() for p in (tmp_path / "regparm" / "build").rglob("mix.c"))
+
+
 @pytest.mark.parametrize("which", ["i386", "i386clang"])
 def test_gizmo_i386_rewritten_functions_agree(which, tmp_path):
     """The rewritten C over the original, every argument on the stack: functions that do not fit move

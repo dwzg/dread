@@ -2700,7 +2700,9 @@ def apply_types(tree, fn, p, made_for=None, names=None):
                 "%s%s" % (t, n) if t.endswith("*") else "%s %s" % (t, n) for t, n in params) or "void")
             for item in tree.items:         # (a function that calls itself declares itself: the same types)
                 if isinstance(item, C.Raw) and re.match(r"^extern \w+ %s\(" % re.escape(fn.name), item.text):
-                    item.text = "extern %s %s(%s);" % (m.group(1), fn.name, ", ".join(t for t, _ in params) or "void")
+                    said = re.search(r"\)(\s*__attribute__\(\(.*\)\));\s*$", item.text)    # (its convention)
+                    item.text = "extern %s %s(%s)%s;" % (m.group(1), fn.name, ", ".join(t for t, _ in params) or "void",
+                                                         said.group(1) if said else "")
     moved = {}
     for st in fn.body.body:
         if isinstance(st, C.Decl):
