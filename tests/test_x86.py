@@ -322,6 +322,12 @@ def test_a_call_of_a_variadic_function_passes_what_the_call_site_stored(tmp_path
             assert any("*(volatile u32 *)((u32)(sp0 - %s)) = " % slot in line for line in lines_[:k]), (slot, text)
     lines = []
     assert lift.check(target, image, ["caller"], out=lines.append, jobs=2) == ["caller"], lines
+    # total itself: its va_list from sa0's address (GCC 15's lea), or its index into the words behind
+    # sa0 (GCC 13's), and the C reads the words the caller pushed
+    text = lifter.lift(program.by_name["total"]).text
+    assert "&sa0" in text, text
+    lines = []
+    assert lift.check(target, image, ["total"], out=lines.append, jobs=2) == ["total"], lines
     monkeypatch.setattr(lift_x86.X86Lifter, "walks_stack_args", lambda self, fn: False)
     lifter = lift.make_lifter(program, regflow.load(target, image, program))
     text = lifter.lift(program.by_name["caller"]).text

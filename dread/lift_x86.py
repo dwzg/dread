@@ -716,6 +716,17 @@ class X86Lifter(lift.Lifter):
             base = self._base(insn, op, depth, values)
             if base is not None:
                 return self._slot(base[1] - mem.disp)
+        if index and mem.base:
+            name = self._reg(insn, mem.base)
+            v = ("sp", depth) if name == "sp" else values.get(name)
+            if isinstance(v, tuple) and len(v) == 2 and v[0] == "sp" and v[1] - mem.disp <= -4:
+                # an index into the stack arguments (GCC 13's va_arg loop: mov ecx, [ebp + eax*4 + 0xc]): from
+                # sa0's address, as the address of one is (the C's frame array does not reach them)
+                if not self.ctx["stack_params"]:
+                    raise Refused("0x%x indexes into stack arguments it has no parameter for" % insn.address)
+                iname = self._reg(insn, index)
+                idx = "%s * %du" % (iname, mem.scale) if mem.scale != 1 else iname
+                return "(u32)((u32)&sa0 + %du + %s)" % (-(v[1] - mem.disp) - 4, idx)
         parts = []
         if mem.base:
             name = self._reg(insn, mem.base)
@@ -802,6 +813,12 @@ class X86Lifter(lift.Lifter):
             return None
         made = self.made_value(insn, *self.ctx["states"][a])
         if made is not None and made[1] and made[1][0] == "sp" and made[1][1] <= 0:
+            if made[1][1] <= -4 and m in ("lea", "mov") and self.ctx["stack_params"]:
+                # the address of a stack argument (va_start: printf's lea ebx, [ebp + 0xc]): the C's stack
+                # parameters lie where cdecl puts them, in the caller's words one after another (GCC and
+                # clang keep a parameter whose address is taken in its slot), so it is sa0's address plus
+                # the distance, and a walk on from it reads the words the caller pushed
+                return "%s = (u32)&sa0 + %du;" % (made[0], -made[1][1] - 4)
             raise Refused("0x%x takes the address of %s" % (a, "a stack argument" if made[1][1] <= -4
                                                             else "its return address"))
         if kind == "return":

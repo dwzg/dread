@@ -6545,9 +6545,14 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         reads cf behind it), and rep movsd (2), which the lifter's string loop took all along: capstone
         names it with its prefix (rep movsd), which the prefix check refused. tests/test_x86.py: crit,
         flag and copy.
+      - [x] The address of a stack argument (2026-10-27; 7 on the trial build: printf, g_printf, ...):
+        va_start's lea eax, [ebp + 0xc] is (u32)&sa0 + 4 in the C, and an index into the stack arguments
+        (GCC 13 made the same va_arg loop mov ecx, [ebp + eax*4 + 0xc]) goes from sa0's address too: the
+        C's stack parameters lie in the caller's words one after another, as cdecl puts them, and GCC and
+        clang keep a parameter whose address is taken in its slot, so a walk on from it reads what the
+        caller pushed. printf, g_printf and g_printf_rcc pass the lift check (tests/test_x86.py: total).
       - [ ] Pushes of every register, iret, in and out, rdtsc (the port's assembly and the support code:
-        refused, rightly for now), the address of a stack argument taken (printf, sprintf: va_start; 7
-        on the trial build once regparm(3) and int N let their callers lift).
+        refused, rightly for now).
       - [ ] What remains of the failing cases once the above is done (52 cases with other memory, 15
         with another result and other stub calls in the first round), and the case generation errors
         (10).
