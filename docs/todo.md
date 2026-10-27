@@ -6657,7 +6657,10 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         (pcTimerGetName on the -O2 build, behind its assertion). tests/test_x86.py: getname.
       - [ ] clang aligns the stack in 14 functions of the bench's clang 16 -Os build (and esp, -16:
         "changes the stack pointer in a way not modelled"): a frame whose base is computed at run time.
-      - [ ] bsr and bsf are not modelled (two functions in each bench build).
+      - [x] bsr and bsf (2026-10-27; two functions in each bench build: vTaskSwitchContext's
+        portGET_HIGHEST_PRIORITY and libgcc's __udivdi3): __builtin_clz and __builtin_ctz behind a test for 0,
+        where zf is set and the destination keeps its value. Both lift on the GCC -Os build now
+        (vTaskSwitchContext gets no case yet, __udivdi3 misses four instructions). tests/test_x86.py: top, low.
       - [ ] Cases whose original runs into the limit: vGalileoLegacyGPIOInitializationForLED on the -O2
         build failed 26 of 47 ("original: ... did not return within 200000 instructions"), while dread
         trace runs the same cases to the end in both images: the generator's runs and the runner's

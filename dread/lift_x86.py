@@ -1044,6 +1044,15 @@ class X86Lifter(lift.Lifter):
             # reads cf behind it (FreeRTOS's event groups: bt eax, 0x19; jae)
             bit = "%du" % (ops[1].imm & 31) if ops[1].type == X.X86_OP_IMM else "(%s & 31u)" % self._source(insn, ops[1])
             return "cf = (%s >> %s) & 1u;" % (self._source(insn, ops[0]), bit)
+        if m in ("bsr", "bsf") and ops[0].type == X.X86_OP_REG and \
+                LANES.get(insn.reg_name(ops[0].reg), (0, 0))[1] == M32:
+            # the index of the highest (bsr) or lowest (bsf) bit set; zf where the source is 0, and the
+            # destination then as it was (so Intel's and AMD's cores do, and the emulator); the other flags
+            # undefined (as they were in the C). FreeRTOS's IA32 port picks the highest ready priority with
+            # bsr (portGET_HIGHEST_PRIORITY): refused until 2026-10-27
+            index = "31u - (u32)__builtin_clz(s0)" if m == "bsr" else "(u32)__builtin_ctz(s0)"
+            return "{ s0 = %s; zf = s0 == 0; if (!zf) { %s } }" % (self._source(insn, ops[1]),
+                                                                    self._write(insn, ops[0], index))
         raise Refused("0x%x: %s is not modelled" % (a, m))
 
     def _mov(self, insn, ops):

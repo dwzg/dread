@@ -1170,6 +1170,50 @@ def test_a_read_through_a_null_pointer_is_no_trap(tmp_path):
     assert lift.check(target, image, ["getname"], out=lines.append, jobs=2) == ["getname"], lines
 
 
+BITSCAN_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+
+__attribute__((noinline)) u32 top(u32 bits)
+{
+    u32 r = 99;
+    __asm__ ("bsr %1, %0" : "+r"(r) : "rm"(bits) : "cc");
+    return r;
+}
+
+__attribute__((noinline)) u32 low(u32 bits)
+{
+    u32 r = 77;
+    __asm__ ("bsf %1, %0" : "+r"(r) : "rm"(bits) : "cc");
+    return r;
+}
+
+void _start(void)
+{
+    sink[1] = top(0x50) + low(0x50);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_bsr_and_bsf(tmp_path):
+    """bsr and bsf: the highest and the lowest bit set, the destination kept where the source is 0 (99 and
+    77 here: the asm's "+r"); FreeRTOS's IA32 port picks the highest ready priority with bsr, and the lifter
+    refused it. top's and low's lift checks pass."""
+    target = small_i386(tmp_path, BITSCAN_C, "bitscan")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import lift, regflow
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    assert "__builtin_clz" in lifter.lift(program.by_name["top"]).text
+    lines = []
+    assert sorted(lift.check(target, image, ["top", "low"], out=lines.append, jobs=2)) == ["low", "top"], lines
+
+
 PICK_C = r"""
 typedef unsigned int u32;
 volatile u32 sink[4];
