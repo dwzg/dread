@@ -6534,10 +6534,11 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         GCC passes on the stack whatever the regparm, so eax is no argument of it; a tail call to one is
         refused. vAssertCalled, xQueueGenericCreate and vQueueDelete then pass, and readable C reads
         printf(0x10d1b4u, ebx, esi) (tests/test_x86.py: a variadic total and its caller).
-      - [ ] A stub of a printf-family callee on i386 logs its named words alone (stub_words: the
-        callee's own stack analysis); its format's words are stack words there, which format_mask
-        (registers) does not see. Only where printf is stubbed (a run hung in it): it mostly runs for
-        real, and what it prints is compared.
+      - [x] A stub of a printf-family callee on i386 logs what its format takes (checked 2026-10-27): the
+        stub's arguments are cdecl's stack words there, so format_mask, which goes over them, sees the
+        format's words; the stub logs the format and the words behind it (since e096fdd after the named
+        ones; before, in front of them). The entry was older than that. tests/test_x86.py: say's
+        printf("%u %u\n", v, v + 1) logs the format, 7 and 8.
       - [x] int N (2026-10-27; 16 functions at first, 23 once regparm(3) let more of them lift): FreeRTOS's
         yield (int 0x50, portYIELD). As RISC-V's ecall and ARM's svc, a logged system call in the emulator:
         Unicorn reports int N as it reports a fault, with its number, but resumes behind it, so the layer

@@ -985,6 +985,54 @@ def test_a_register_handed_back_through_a_call(tmp_path):
     assert lift.check(target, image, ["outer2"], out=lines.append, jobs=2) == ["outer2"], lines
 
 
+SAY_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+
+__attribute__((noinline)) int printf(const char *fmt, ...)
+{
+    sink[0] = (u32)fmt;
+    return 0;
+}
+
+void say(u32 v)
+{
+    printf("%u %u\n", v, v + 1);
+}
+
+void _start(void)
+{
+    say(7);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_printf_stub_logs_what_its_format_takes(tmp_path):
+    """A stub of a printf-family callee (dread.varargs family, by name) logs its named stack word, the
+    format, and the words the format takes behind it (format_mask over the stub's arguments, cdecl's stack
+    words on x86): say's call of printf("%u %u\\n", v, v + 1) logs the format and 7 and 8, so a rebuilt
+    caller that passed other numbers would differ."""
+    target = small_i386(tmp_path, SAY_C, "say")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread.autocase import Generator
+    image = target.image()
+    gen = Generator(target, image)
+    printf, say = gen.program.by_name["printf"], gen.program.by_name["say"]
+    assert gen.formats()[0] == {printf.entry: 0}
+    case = {"args": [7], "mem": [], "returns": [0], "frame": 0,
+            "calls": [[printf.entry, gen.reads_mask("printf"), gen.stub_words(printf.entry)]]}
+    m = gen.machine()
+    m.plan = []
+    gen.apply(m, case)
+    m.call(say.entry, 7, max_instructions=20000)
+    entry = list(m.calls[0])
+    assert entry[0] == "call 0x%x" % printf.entry and entry[2:] == [7, 8], m.calls
+    assert bytes(m.read(entry[1], 6)) == b"%u %u\n", entry
+
+
 PICK_C = r"""
 typedef unsigned int u32;
 volatile u32 sink[4];
