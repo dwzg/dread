@@ -1594,6 +1594,7 @@ class Lifter:
             if kind == "jump" and target is not None and code_address(self.arch, target) in depth:
                 targets.add(code_address(self.arch, target))
         self.ctx = {"fn": fn, "depth": depth, "states": states, "undef": undef, "frame": frame, "callees": set(),
+                    "targets": targets,     # (the labels: where a block starts)
                     "bound": set(), "handed": handed, "save_area": self.save_area(fn, insns), "wrapped": wrapped,
                     "flags_in": flags_in, "handler": handler, "fp": self.uses_fpu(insns), "out": out,
                     "stack_params": stack_params, "switch": {}, "switch_targets": set(), "more": more,

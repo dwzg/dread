@@ -51,6 +51,7 @@ core leaves undefined are the emulator's (QEMU's), which dread liftfuzz checks a
 mul's and imul's low half, of behind a shift by more than one from the last bit shifted, all four
 unchanged behind div.
 """
+from capstone import CS_AC_READ, CS_AC_WRITE
 from capstone import x86 as X
 
 from dread import lift
@@ -76,6 +77,7 @@ JUMPS = {"j" + c: c for c in CONDITIONS}
 SETS = {"set" + c: c for c in CONDITIONS}
 MOVES = {"cmov" + c: c for c in CONDITIONS}
 STRING_OPS = ("movsb", "movsw", "movsd", "stosb", "stosw", "stosd")     # (_string: with rep, too)
+BARRIER = '__asm__ volatile ("" ::: "memory");'     # (insn: where GCC could reorder two volatile loads)
 MUSTTAIL = "typedef unsigned (*f_)(unsigned);\nunsigned g_(f_ p, unsigned x) { __attribute__((musttail)) return p(x); }\n"
 NOPS = ("nop", "cld", "endbr32", "pause")   # cld: the direction flag is clear at every call (the ABI)
 ARITH = ("add", "adc", "sub", "sbb", "cmp", "and", "or", "xor", "test")
@@ -171,7 +173,11 @@ class X86Lifter(lift.Lifter):
                     raise Refused("0x%x pops into the stack pointer" % insn.address)
                 self._put(after, name, values.get(depth))
             elif ops[0].type == X.X86_OP_MEM:
-                s = self._mem_slot(insn, ops[0], depth + 4, values)     # (esp is incremented first)
+                if ops[0].mem.base and self._reg(insn, ops[0].mem.base) == "sp" or \
+                        self._index(insn, ops[0]) and self._reg(insn, self._index(insn, ops[0])) == "sp":
+                    # (esp is incremented before the address is formed; no compiler writes it)
+                    raise Refused("0x%x pops into memory addressed through esp" % insn.address)
+                s = self._mem_slot(insn, ops[0], depth, values)
                 if s is not None:
                     self._put(after, s, values.get(depth))
             return depth - 4, after
@@ -439,7 +445,7 @@ class X86Lifter(lift.Lifter):
         if m == "pop":
             out.append((depth, 4, True, False))
             if ops[0].type == X.X86_OP_MEM:
-                s = self._mem_slot(insn, ops[0], depth + 4, values)
+                s = self._mem_slot(insn, ops[0], depth, values)     # (not through esp: step refuses that)
                 if s is not None:
                     out.append((s, 4, False, True))
             return out
@@ -529,7 +535,10 @@ class X86Lifter(lift.Lifter):
         elif kind in ("call", "icall"):
             fx.accesses.append(("sp", None, -4, 4, "store", None, False))     # the return address
         for k, o in enumerate(ops):
-            if o.type != X.X86_OP_MEM or m in ("lea", "nop", "push", "pop") or o.mem.segment:
+            # (push and pop of a memory operand read or write it besides the stack word: "other". Left
+            # out, push dword ptr [ebp - 0x1c] read nothing here, saves_out took the word for a save,
+            # and FreeRTOS's prvAddCurrentTaskToDelayedList lost the store of what it pushes later)
+            if o.type != X.X86_OP_MEM or m in ("lea", "nop") or o.mem.segment:
                 continue
             base = self._reg(insn, o.mem.base) if o.mem.base else None
             index = self._reg(insn, self._index(insn, o)) if self._index(insn, o) else None
@@ -797,6 +806,90 @@ class X86Lifter(lift.Lifter):
         return "%s = (%s %s %s) & 0x%xu; cf = of = 0; %s" % (res, e, op, s, mask, self._zs(res, size))
 
     def insn(self, insn):
+        """The statement of an instruction (_insn), behind a compiler barrier where GCC could otherwise
+        reorder two of its volatile loads (ordered)."""
+        barrier = self._needs_barrier(insn)
+        text = self._insn(insn)
+        self._track_loads(insn, text, barrier)
+        if barrier:
+            return BARRIER + (" " + text if text else "")
+        return text
+
+    def _loaded(self):
+        """The registers whose value came from a volatile load of memory outside the frame since the
+        block started (_track_loads)."""
+        return self.ctx.setdefault("loaded", set())
+
+    def _outside_reads(self, insn):
+        """How many reads of memory outside the frame and the stack arguments the instruction makes (its
+        memory operands that it reads, and movs's source)."""
+        depth, values = self.ctx["states"][insn.address]
+        n = 0
+        for op in insn.operands:
+            if op.type == X.X86_OP_MEM and op.access & CS_AC_READ and insn.mnemonic != "lea" and \
+                    self._base(insn, op, depth, values) is None:
+                n += 1
+        return n
+
+    def _value_reads(self, insn):
+        """The registers an instruction reads as values (whole names): its register operands that it
+        reads, and eax, ecx and edx where it reads them unnamed (mul, cdq, rep's count); not the
+        registers that only form an address."""
+        out = set()
+        for op in insn.operands:
+            if op.type == X.X86_OP_REG and op.access & CS_AC_READ:
+                lane = LANES.get(insn.reg_name(op.reg))
+                if lane is not None:
+                    out.add(lane[0])
+        try:
+            implicit = insn.regs_read
+        except Exception:
+            implicit = ()
+        out |= {insn.reg_name(r) for r in implicit} & {"eax", "ecx", "edx"}
+        return out
+
+    def _needs_barrier(self, insn):
+        """Whether the instruction needs a compiler barrier in front: it reads two values of memory
+        outside the frame (its own memory operand, and registers loaded from such memory since the block
+        started). GCC 16 folds both volatile loads into one instruction then (combine: the later one,
+        then the earlier one too, as cmp mem, mem matches i386's pattern before reload) and reload loads
+        the second into a register first, so the reads change order: lifted from mov eax, [ebx + 0x38];
+        cmp [ebx + 0x3c], eax, the C read 0x3c before 0x38 (GCC 11 to 13 and clang kept the order). The
+        barrier, an asm statement with a memory clobber, is one combine does not move a load across;
+        dread.cflow counts it as an effect, so the readable passes keep the loads on their sides. The
+        frame's accesses are left out: their order is nobody's to see."""
+        loaded = self._loaded()
+        a = insn.address
+        if a in self.ctx.get("targets", ()) or a in self.ctx["switch_targets"]:
+            loaded.clear()                  # (a block starts: GCC's combine works within one)
+        return self._outside_reads(insn) + len(self._value_reads(insn) & loaded) >= 2
+
+    def _track_loads(self, insn, text, barrier):
+        """Keep the set of registers loaded from memory outside the frame (_loaded) after an
+        instruction: cleared behind a barrier, at the end of a block, behind a call and behind an asm
+        statement or a store (both volatile: combine moves no load across them); the registers the
+        instruction writes leave it, and a load (mov, movzx, movsx) or a copy of one enters it."""
+        loaded = self._loaded()
+        kind = self.arch.flow(insn)[0]
+        if barrier or kind != "next" or (text and "__asm__" in text):
+            loaded.clear()
+            return
+        m, ops = insn.mnemonic, insn.operands
+        if any(op.type == X.X86_OP_MEM and op.access & CS_AC_WRITE for op in ops) or m in STRING_OPS \
+                or self.arch.stack_kind(insn) == "push":
+            loaded.clear()                  # (a volatile store; a push writes the frame)
+            return
+        copied = m == "mov" and len(ops) == 2 and ops[1].type == X.X86_OP_REG and \
+            LANES.get(insn.reg_name(ops[1].reg), (None,))[0] in loaded
+        _, writes = self.arch.reg_effects(insn)
+        loaded -= writes
+        if len(ops) == 2 and ops[0].type == X.X86_OP_REG and (copied or (
+                m in ("mov", "movzx", "movsx") and ops[1].type == X.X86_OP_MEM and self._outside_reads(insn))):
+            lane = LANES.get(insn.reg_name(ops[0].reg))
+            if lane is not None and lane[0] != "sp":
+                loaded.add(lane[0])
+
+    def _insn(self, insn):
         self.insn_now = insn
         m, ops, a = insn.mnemonic, insn.operands, insn.address
         kind, target, falls = self.arch.flow(insn)
@@ -1127,6 +1220,12 @@ class X86Lifter(lift.Lifter):
         # stack argument k
         slots = [d - 4 - 4 * k if tail else d - 4 * k for k in range(nstack)]
         words = [self._load(self._slot(s), 4) for s in slots]
+        if tail:
+            # our own stack argument k itself, not a volatile read of it: then GCC and clang jump to the
+            # callee with the word where it lies, as the original's jmp does. Read through a volatile,
+            # GCC stored it back into its slot before the jump (a write the original never makes:
+            # FreeRTOS's uxTimerGetReloadMode differed in every case), and clang made a call of it
+            words = ["sa%d" % k for k in range(nstack)]
         if nstack and not tail:
             back = self._read_back(insn, slots)
             if back is not None:

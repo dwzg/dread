@@ -118,7 +118,15 @@ needed on it):
   heads are written anew, keeps it; its ARGS is ("eax",), and c_uses has a call read it only where the
   callee takes it), and an entry analysis that
   leaves out what an instruction reads only to keep the rest of a register whose part it writes (the
-  layer's merge_only: mov bl, cl).
+  layer's merge_only: mov bl, cl). FreeRTOS's IA32 demo showed three more (2026-10-27): an instruction
+  that reads two values of memory outside the frame (its memory operand and a register loaded from
+  such memory in the same block) gets a compiler barrier in front (GCC 16 folds both volatile loads
+  into one compare, cmp mem, mem matching i386's pattern before reload, and reload loads the later one
+  first; GCC 11 to 13 and clang keep the order); a tail jump passes the function's own stack
+  parameters themselves (a volatile read of one, GCC stored back into its slot before its jmp, a write
+  the original never makes); and push and pop of a memory operand read and write that word in the
+  frame analysis (saves_out had taken a word that only a push reads for a save, and the C lost its
+  store).
 - `dread.elfimport`: ARM dispatch slots and padding between functions (other architectures skip
   them).
 

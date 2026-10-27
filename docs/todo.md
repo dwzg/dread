@@ -6553,9 +6553,42 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         caller pushed. printf, g_printf and g_printf_rcc pass the lift check (tests/test_x86.py: total).
       - [ ] Pushes of every register, iret, in and out, rdtsc (the port's assembly and the support code:
         refused, rightly for now).
-      - [ ] What remains of the failing cases once the above is done (52 cases with other memory, 15
-        with another result and other stub calls in the first round), and the case generation errors
-        (10).
+      - [x] Three of the trial build's disagreements traced to their cause (2026-10-27): (1) GCC 16
+        reorders two volatile loads: mov eax, [ebx + 0x38]; cmp [ebx + 0x3c], eax lifted, combine folds
+        the later load into the compare and then the earlier one too (cmp mem, mem matches i386's pattern
+        before reload), and reload loads 0x3c first, so a null queue faulted at 0x3c, not 0x38
+        (xQueueIsQueueFullFromISR; GCC 11 to 13 and clang keep the order, -fdisable-rtl-combine too,
+        but made the trial build's lifted C 6.5 % larger): a compiler barrier in front of an instruction
+        that reads two values of memory outside the frame (insn: _needs_barrier, _track_loads); (2) a
+        tail jump passed its stack arguments as volatile reads, which GCC stored back into the
+        incoming slots before its jmp (uxTimerGetReloadMode and vEventGroupClearBitsCallback differed
+        in every case): the parameters themselves now, which GCC and clang jump with in place; (3)
+        frame_effects skipped push's and pop's memory operand, so saves_out took a word that only push
+        dword ptr [ebp - 0x1c] reads for a save, and the C lost its store
+        (prvAddCurrentTaskToDelayedList passed vListInsert a word it never stored); pop into memory
+        through esp, whose address three places formed three ways, is refused (no compiler writes it).
+        tests/test_x86.py: isfull, wrap, spill (each fails without its fix).
+      - [ ] A push of a register that a call takes as a stack argument reads that register: FreeRTOS's
+        prvCopyDataFromQueue takes its buffer in edx (regparm(3)) and only pushes it, as memcpy's first
+        argument; dread.regflow counts no push as a read (made for ARM's push {r3, lr}, which only keeps
+        the stack aligned), so its reads were eax alone and the C of its callers passed eax alone
+        (xQueueReceive and xQueuePeek, which lift since the address of a stack argument does, fail so).
+        GCC's padding pushes in front of the arguments (push eax; push eax; push $0x98e; push
+        $0x10cb40; call vAssertCalled) and its push of a dead register that only reserves a word are
+        no reads: the callee's stack argument count (the lifter's stack_args) says which pushed words
+        a call takes.
+      - [ ] An input that has code read stack words nothing wrote (a length past a local:
+        prvNotifyQueueSetContainer copies an item of the input's size from its 4-byte local) reads the
+        original's frame layout, which the C's differs from; dread.fragile refuses it only where a saved
+        register is touched (saves_touched). A check that the run reads no stack byte below the entry's
+        stack pointer that it did not write first would refuse it as the others are (with a Timeline
+        mark at the first such read).
+      - [ ] The case generation errors of the trial build (14): every input faulted, mostly where a
+        callee polls a device through a base address the startup sets (vAssertCalled's
+        ucGalileoGetchar reads the UART through a pointer that is 0 without the startup), and low memory
+        is unmapped on x86, where Cortex-M reads the vector table at 0 (a null pointer there faults
+        nowhere): the tail-call wrappers of FreeRTOS's event groups run their callee's list walk into
+        address 4.
 - [ ] AVR on the emulator interface the MSP430 work brings (clang builds it, Unicorn does not run
   it): an interpreter behind it, Harvard memory (program and data spaces) in the program database.
 - [ ] Z80 (low priority; the user, 2026-10-19: "Z80 and later 8051, but both low in prio"): an engine

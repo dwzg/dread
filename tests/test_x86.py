@@ -497,6 +497,165 @@ def test_cli_sti_and_bt_lift(tmp_path):
         ["copy", "crit", "flag"], lines
 
 
+ORDER_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[20];
+
+/* the original's order: the load of 0x38, then the compare that reads 0x3c */
+__asm__(".text\n.globl isfull\n.type isfull, @function\nisfull:\n"
+        "  movl 4(%esp), %ecx\n  movl 0x38(%ecx), %eax\n  cmpl %eax, 0x3c(%ecx)\n"
+        "  sete %al\n  movzbl %al, %eax\n  ret\n.size isfull, .-isfull\n");
+/* one load: nothing to keep in order */
+__asm__(".text\n.globl isone\n.type isone, @function\nisone:\n"
+        "  movl 4(%esp), %ecx\n  movl 0x38(%ecx), %eax\n  cmpl $7, %eax\n"
+        "  sete %al\n  movzbl %al, %eax\n  ret\n.size isone, .-isone\n");
+u32 isfull(const u32 *q);
+u32 isone(const u32 *q);
+
+void _start(void)
+{
+    sink[1] = isfull((const u32 *)sink) + isone((const u32 *)sink);
+    for (;;)
+        ;
+}
+"""
+
+
+def _gcc_major():
+    try:
+        out = subprocess.run(["gcc", "-dumpversion"], capture_output=True, text=True, check=True).stdout
+        return int(out.split(".")[0])
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return 0
+
+
+def test_two_volatile_loads_keep_their_order(tmp_path, monkeypatch):
+    """isfull loads 0x38 and compares 0x3c with it; GCC 16 folds both loads of the C into one cmp and
+    reload loads 0x3c first, so a null pointer faulted at 0x3c instead of 0x38 (FreeRTOS's
+    xQueueIsQueueFullFromISR on the trial build). The C has a barrier in front of the compare (and none
+    where one load is all: isone), and the case that faults agrees; without the barrier GCC 16's build
+    differs there (GCC 11 to 13 and clang keep the order either way)."""
+    target = small_i386(tmp_path, ORDER_C, "order")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    import json
+    from dread import lift, lift_x86, regflow
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    text = lifter.lift(program.by_name["isfull"]).text
+    barrier = text.index(lift_x86.BARRIER)
+    assert barrier < text.index("cmp dword ptr [ecx + 0x3c], eax") and barrier > text.index("mov eax, dword ptr [ecx + 0x38]"), text
+    assert lift_x86.BARRIER not in lifter.lift(program.by_name["isone"]).text
+    extra = os.path.join(target.root, "tests", "extra_cases")
+    os.makedirs(extra, exist_ok=True)
+    with open(os.path.join(extra, "isfull.json"), "w") as f:
+        json.dump({"cases": [{"args": [0], "mem": [], "returns": [], "calls": [], "frame": 0, "fault": True}]}, f)
+    lines = []
+    assert lift.check(target, image, ["isfull", "isone"], out=lines.append, jobs=2) == ["isfull", "isone"], lines
+    if _gcc_major() >= 16:
+        monkeypatch.setattr(lift_x86.X86Lifter, "_needs_barrier", lambda self, insn: False)
+        shutil.rmtree(os.path.join(target.build, "lift-check"), ignore_errors=True)
+        lines = []
+        assert lift.check(target, image, ["isfull"], out=lines.append, jobs=2) == [], lines
+
+
+PUSHED_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+
+__attribute__((noinline)) u32 take(u32 a, u32 b)
+{
+    sink[0] = a;
+    return a + b;
+}
+
+/* a word stored near the frame's top, read again only by a push of it (a + 0x11: a word nowhere
+   else, which C reading past its frame array does not find by chance) */
+__asm__(".text\n.globl spill\n.type spill, @function\nspill:\n"
+        "  pushl %ebp\n  movl %esp, %ebp\n  pushl %ebx\n  subl $0x14, %esp\n"
+        "  movl 8(%ebp), %eax\n  addl $0x11, %eax\n  movl %eax, -8(%ebp)\n  movl 12(%ebp), %ebx\n"
+        "  pushl %ebx\n  pushl -8(%ebp)\n  call take\n  addl $0x8, %esp\n"
+        "  movl -4(%ebp), %ebx\n  leave\n  ret\n.size spill, .-spill\n");
+u32 spill(u32 a, u32 b);
+
+void _start(void)
+{
+    sink[1] = spill(3, 4);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_word_only_a_push_reads_is_kept(tmp_path):
+    """spill stores its first argument into a frame word right below its saves and reads it again only
+    with push dword ptr [ebp - 8], as take's argument. The frame's top that the C leaves out
+    (dread.lift saves_out) took the word for a save while the push's read went unseen, and the C lost
+    the store (FreeRTOS's prvAddCurrentTaskToDelayedList handed vListInsert a word it never stored):
+    the store is in the C, and the lift check passes."""
+    target = small_i386(tmp_path, PUSHED_C, "pushed")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import lift, regflow
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    text = lifter.lift(program.by_name["spill"]).text
+    assert "= (u32)(eax);  /* " in text and "mov dword ptr [ebp - 8], eax */" in text, text
+    store = [line for line in text.splitlines() if "mov dword ptr [ebp - 8], eax" in line][0]
+    assert store.strip().startswith("*(volatile u32 *)"), store
+    lines = []
+    assert lift.check(target, image, ["spill"], out=lines.append, jobs=2) == ["spill"], lines
+
+
+TAIL_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+
+__attribute__((noinline)) u32 inner(u32 a, u32 b)
+{
+    sink[2] = a - b;
+    return a ^ b;
+}
+
+u32 wrap(u32 a, u32 b)
+{
+    return inner(a, b);
+}
+
+void _start(void)
+{
+    sink[1] = wrap(5, 3);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_tail_call_passes_its_own_stack_arguments(tmp_path):
+    """wrap is jmp inner: the C passes its own stack parameters themselves (sa0, sa1), and GCC and clang
+    jump with the words where they lie. Read through a volatile, GCC stored each back into its slot
+    before the jump, which the original never writes (FreeRTOS's uxTimerGetReloadMode differed in
+    every case so)."""
+    target = small_i386(tmp_path, TAIL_C, "tail")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import lift, regflow
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    wrap = program.by_name["wrap"]
+    if program.insn(wrap.insns[0]).mnemonic != "jmp":
+        pytest.skip("this GCC did not make wrap a jump")
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    assert "inner(eax, sa0, sa1)" in lifter.lift(wrap).text
+    lines = []
+    assert lift.check(target, image, ["wrap"], out=lines.append, jobs=2) == ["wrap"], lines
+
+
 PICK_C = r"""
 typedef unsigned int u32;
 volatile u32 sink[4];
