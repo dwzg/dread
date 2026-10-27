@@ -1248,13 +1248,28 @@ def _stack_word(e, names):
 
 
 def stack_params(fn):
-    """A word parameter the function reads and writes only as a whole through its address is used as
-    itself: the lifters read a stack argument as *(volatile u32 *)((u32)&sa0), so that the C finds it
-    where the caller pushed it, and i386's cdecl passes every argument so (ARM its fifth and later):
-    no x86 parameter took a type or a structure (uxListRemove's list item stayed eax + 4, where ARM's
-    is r0->f_4). Only where every &P of the function is such an access: a walk from &P (a va_list) or
-    &P handed to a callee keeps them all. Returns whether it changed anything."""
+    """A word parameter the function only reads, as a whole through its address, is used as itself: the
+    lifters read a stack argument as *(volatile u32 *)((u32)&sa0), so that the C finds it where the
+    caller pushed it, and i386's cdecl passes every argument so (ARM its fifth and later): no x86
+    parameter took a type or a structure (uxListRemove's list item stayed eax + 4, where ARM's is
+    r0->f_4). Only where every &P of the function is such an access: a walk from &P (a va_list) or &P
+    handed to a callee keeps them all; and only where none writes P: the original's store into its
+    stack argument is a store into its caller's frame, which C's assignment of a parameter need not make
+    (FreeRTOS's vTaskDelay on the GCC -O2 IA32 build stores into its argument's word; as the parameter,
+    until 2026-10-27, the readable C stored nothing there). Returns whether it changed anything."""
     words = {name for ptype, name in fn.params if ptype.strip() == "u32"}
+    if not words:
+        return False
+    from dread.cflow import walk_expr
+    for s in fn.body.body:                  # (the parameters something writes: they keep their stores)
+        for st in _flat(s):
+            for e in _stmt_all_exprs(st):
+                for x in walk_expr(e):
+                    target = x.target if isinstance(x, C.Assign) else \
+                        x.e if isinstance(x, C.Post) or (isinstance(x, C.Unary) and x.op in ("++", "--")) else None
+                    name = _stack_word(target, words) if target is not None else None
+                    if name is not None:
+                        words.discard(name)
     if not words:
         return False
     taken, whole = {}, {}

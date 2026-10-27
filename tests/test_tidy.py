@@ -304,28 +304,32 @@ u32 h(u32 a0, u32 a1, u32 a2, u32 a3)
 
 STACK_PARAMS = """
 extern u32 g(u32, u32);
-u32 f(u32 eax_in, u32 sa0, u32 sa1)
+u32 f(u32 eax_in, u32 sa0, u32 sa1, u32 sa2)
 {
     u32 eax = eax_in, ebx = 0, ecx = 0;
     ebx = *(volatile u32 *)((u32)&sa0);  /* 1: mov ebx, dword ptr [ebp + 8] */
-    *(volatile u32 *)((u32)&sa0) = ebx + 1u;  /* 2: mov dword ptr [ebp + 8], eax */
+    *(volatile u32 *)((u32)&sa2) = ebx + 1u;  /* 2: mov dword ptr [ebp + 0x10], eax */
     ecx = *(volatile u32 *)((u32)&sa1);  /* 3: mov ecx, dword ptr [ebp + 0xc] */
     eax = g(eax, (u32)&sa1 + 4u);  /* 4: call g (a walk from sa1's address) */
-    return eax + ebx + ecx + *(volatile u32 *)((u32)&sa0);  /* 5: ret */
+    return eax + ebx + ecx + *(volatile u32 *)((u32)&sa0) + *(volatile u32 *)((u32)&sa2);  /* 5: ret */
 }
 """
 
 
 def test_a_stack_parameter_read_whole_is_the_parameter():
     """The lifters read a stack argument through its address (i386's cdecl: every argument); where the
-    function uses the address only so, as a whole word, the parameter is used as itself (stack_params:
-    sa0, read, written and read again). sa1's address also goes to g, a walk from it: its accesses stay."""
+    function uses the address only so, as a whole word, and only reads it, the parameter is used as
+    itself (stack_params: sa0, read twice). sa1's address also goes to g, a walk from it: its accesses
+    stay. sa2 is written: the original's store into its caller's frame, which C's assignment of a
+    parameter need not make (vTaskDelay on the IA32 bench's GCC -O2 build: until 2026-10-27 it became
+    sa2 = ..., and the readable C stored nothing there), so its accesses stay too."""
     tree = cparse.parse(STACK_PARAMS)
     fn = tree.function("f")
     assert tidy.stack_params(fn)
     text = cparse.unparse(fn, notes=False)
-    assert "&sa0" not in text and "ebx = sa0;" in text and "sa0 = ebx + 1u;" in text, text
+    assert "&sa0" not in text and "ebx = sa0;" in text and "+ sa0" in text, text
     assert text.count("*(volatile u32 *)(u32)&sa1") == 1 and "(u32)&sa1 + 4u" in text, text
+    assert text.count("*(volatile u32 *)(u32)&sa2") == 2, text
     assert not tidy.stack_params(fn)                    # (nothing left to change)
 
 

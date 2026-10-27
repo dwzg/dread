@@ -6703,6 +6703,17 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         reached 4 instructions no other case reaches, and its old readable C had agreed with it by
         chance. ARM GCC -Os: the 12 functions with stack arguments, raw 115 -> 99, every function
         readable as before. tests/test_tidy.py: sa0 and sa1 (whose address goes to a callee: kept).
+        Corrected the same evening: a parameter the function writes keeps its accesses. The original's
+        store into its stack argument is a store into its caller's frame, which C's assignment of a
+        parameter need not make: vTaskDelay on the GCC -O2 build stored nothing there as readable C
+        ("memory 0x1d0000: 33 vs None"; readable in the afternoon's bench, lifted in the evening's
+        measurement). tests/test_tidy.py: sa2, written.
+      - [ ] A stack parameter used as itself lets GCC reuse its word (found 2026-10-27): no longer
+        addressable, a parameter's incoming word is GCC's to spill into once the parameter is dead, and
+        xEventGroupWaitBits's readable C on the GCC -O2 build stores sa1's value into sa3's word (mov
+        [ebp + 0x14], ebx), a store the original never makes, so the gate keeps it lifted. Declaring a
+        parameter so used volatile (volatile u32 sa3: its reads and writes the word's, as the original's)
+        would keep the word; the types pass, which rewrites parameter types, has to keep the qualifier.
       - [x] x86's pointers became word arrays, not structures: uxListRemove's sa0 was volatile u32 * with
         sa0[1], sa0[2], sa0[4], where ARM's r0 is a struct s_15 * with r0->f_4, f_8, f_10. The cause
         (2026-10-27): x86's lifter writes an access's address inside an integer cast, *(volatile u32 *)((u32)
@@ -6724,6 +6735,12 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         before. Not done: the callers' calls still pass eax (f(eax, x)), a phantom argument; dropping it
         means declaring the callee regparm(0) in each caller's file. tests/test_x86.py: f's head (eax_in
         read, regparm 3, variadic: kept), scaled through the gate, its call of sum with eax written first.
+        Corrected the same evening: regparm 3 is judged by the lifted C's head (lifted_registers), not by
+        the names, which the naming had changed: clang's fastcc functions on the IA32 bench build
+        (prvAddCurrentTaskToDelayedList, prvCopyDataToQueue and more, readable in the afternoon), edx_in
+        and ecx_in named edx and ecx, lost eax and read both from the stack. With this and the stack
+        parameters' correction (below) the clang build has 234 of its 235 lifted functions readable
+        again (226 between). tests/test_x86.py: the renamed head kept.
         Tried the same day and not kept: a call of a callee that does not take eax (_takes_eax) passed
         none, its declaration regparm(0) (gizmo-i386 and the GCC -Os bench build: no loss). On the GCC -O2
         build vStartQueueSetTasks, vStartSemaphoreTasks and vStartInterruptQueueTasks lost coverage:

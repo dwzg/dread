@@ -1381,14 +1381,25 @@ def _named(name, text, stages, context=None, cleaned=None):
         if context is not None and getattr(context, "folds_memory", False):
             from dread import volorder
             volorder.guard(tree, fn)        # (x86: two volatile loads one statement combines kept in order)
-        cdecl(tree, fn)
+        cdecl(tree, fn, text)
     return tree, fn, stages
 
 
 CDECL = "__attribute__((regparm(0))) "      # (the head of readable C compiled cdecl: see cdecl)
 
 
-def cdecl(tree, fn):
+def lifted_registers(text, name):
+    """The register parameters of the lifted C's head of name (x86: eax_in, and edx_in and ecx_in for a
+    function of regparm 3), as the lifter wrote them, before the naming renamed any; None where the text
+    has no such head."""
+    import re
+    m = re.search(r"^(?!extern\b)[^\n(]*\b%s\(([^)\n]*)\)\s*$" % re.escape(name), text or "", re.M)
+    if m is None:
+        return None
+    return [p.split()[-1] for p in m.group(1).split(",") if p.split() and p.split()[-1].endswith("_in")]
+
+
+def cdecl(tree, fn, text=None):
     """A function the x86 lifter gave eax as its first parameter (eax_in, in eax: dread.build compiles its
     file with -mregparm=1) whose readable C never reads it is compiled as cdecl, without it: its head says
     regparm(0) (CDECL), and its stack parameters lie where cdecl has them either way, so its callers, which
@@ -1397,7 +1408,9 @@ def cdecl(tree, fn):
     functions). The file keeps -mregparm=1, for its calls of the functions it declares: a whole file
     compiled cdecl passed vMicroSecondDelay's __udivdi3 its eax on the stack, every argument a word off.
     Only for a function of regparm 1 (no edx_in nor ecx_in: with regparm 3, dropping eax would move edx
-    into it), not variadic (GCC passes no register arguments to one), whose stack parameters follow (one
+    into it; text, the lifted C, says so in its head where the naming has renamed them since: until
+    2026-10-27 only the names counted, and clang's fastcc functions on the IA32 bench build, edx_in and
+    ecx_in named edx and ecx, lost eax and read both from the stack), not variadic (GCC passes no register arguments to one), whose stack parameters follow (one
     alone goes with dread.tidy params, as a trailing one), and where nothing in the body names eax_in.
     Returns whether it changed anything."""
     import re
@@ -1405,6 +1418,8 @@ def cdecl(tree, fn):
     if len(fn.params) < 2 or names[0] != "eax_in" or fn.params[0][0].split()[-1] not in ("u32", "s32") or \
             "edx_in" in names or "ecx_in" in names or "..." in fn.head or "regparm" in fn.head:
         return False
+    if text is not None and lifted_registers(text, fn.name) != ["eax_in"]:
+        return False                        # (regparm 3 in the lifted head, its edx_in and ecx_in renamed since)
     from dread.cflow import walk_expr
     from dread.tidy import _flat, _stmt_all_exprs
     for s in fn.body.body:

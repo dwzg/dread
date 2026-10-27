@@ -1524,6 +1524,14 @@ def test_an_eax_nothing_reads_leaves_the_head():
     variadic = CDECL_C.replace("u32 f(u32 eax_in, u32 sa0)", "u32 f(u32 eax_in, u32 sa0, ...)")
     tree = cparse.parse(variadic)
     assert not readable.cdecl(tree, tree.function("f"))
+    # regparm 3 in the lifted C's head, edx_in and ecx_in renamed by the naming since (clang's fastcc
+    # functions on the IA32 bench build lost eax and read edx and ecx from the stack until 2026-10-27)
+    renamed = three.replace("u32 edx_in, u32 ecx_in", "u32 edx, u32 ecx")
+    tree = cparse.parse(renamed)
+    assert not readable.cdecl(tree, tree.function("f"), text=three)
+    assert readable.lifted_registers(three, "f") == ["eax_in", "edx_in", "ecx_in"]
+    tree = cparse.parse(CDECL_C)
+    assert readable.cdecl(tree, tree.function("f"), text=CDECL_C)
 
 
 SUM_C = r"""
