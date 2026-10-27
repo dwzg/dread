@@ -209,11 +209,11 @@ def i386_copy(tmp_path):
 
 
 # (not mul64: its written cases compare its result's upper half, which no caller in the image reads, so
-# the register flow cannot tell; nor script_run, whose generated cases miss one arm of its switch:
-# docs/todo.md. uart_putc and uart_puts: the edx that GCC keeps across the call; dispatch: a tail call
-# through a pointer, made a jump)
+# the register flow cannot tell: docs/todo.md. uart_putc and uart_puts: the edx that GCC keeps across
+# the call; dispatch: a tail call through a pointer, made a jump; script_run: its arguments, stack words,
+# varied as arguments since generator VERSION 36, reach every arm of its switch)
 I386_NAMES = ["clamp", "checksum", "parse_uint", "fmt_hex", "sum6", "udiv_var", "uart_init", "print_status",
-              "strcmp", "parse_kv", "uart_putc", "uart_puts", "dispatch"]
+              "strcmp", "parse_kv", "uart_putc", "uart_puts", "dispatch", "script_run"]
 
 
 def test_gizmo_i386_lift_check_accepts_what_agrees_and_drops_a_mistake(tmp_path, monkeypatch):

@@ -143,7 +143,7 @@ from dread.cases import confine_args
 from dread.emu import PAGE, RUN_CALLEE, EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 35       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 36       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -204,6 +204,9 @@ VERSION = 35       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # (repair_lost); 35: every stub of a callee logs the callee's stack arguments
                   # (stub_words), not only a loop case's: i386 passes every argument on the stack, and
                   # the stub of a callee a run hung in logged none (gizmo-i386's handle_key, read_line)
+                  # 36: a function's stack arguments are arguments of its cases (arg_count), not memory
+                  # cells: the chase, the learned pointers, the null and decider stages vary them as
+                  # they vary the argument registers (i386: every argument; gizmo's script_run)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
@@ -1282,7 +1285,7 @@ class Generator:
         pool = sorted(set(self.boundary) | exact | near | deeper | set(chars) | set(noise))
         image = self.image
         start, end = cover_span(self.program, words)
-        known, covered, corpus, extras, faults, last_gain = Cells(), set(), [], [], 0, 0
+        known, covered, corpus, extras, faults, last_gain = Cells(self.arg_room(entry)), set(), [], [], 0, 0
         calls = [list(c) for c in calls]    # grows by the callees runs hang in (hung, below)
         hung = set()
         deciders = set()                    # callees stubbed because the search stalled behind their call
@@ -1299,7 +1302,7 @@ class Generator:
         pin_args, pin_mem = set(pins[0]) if pins else set(), set(pins[1]) if pins else set()
         data_args, data_mem = {}, {}        # inputs learned to be data pointers -> their buffer
         words_set = set(words)
-        nregs = len(self.layout.arg_regs)
+        nregs = self.arg_count(entry)       # (the argument registers, then the stack arguments)
         fregs = self.fp_inputs(name)        # float arguments in the FPU's registers (hard float)
 
         def buffer_for(slot):
@@ -1947,6 +1950,23 @@ class Generator:
                 calls.append([fn.entry, self.reads_mask(fn.name), self.stack_words(fn)])
         return calls, stops
 
+    def arg_count(self, entry):
+        """How many arguments a case gives the function at entry: its argument registers, then its
+        stack arguments (stack_words), which Machine.call writes into the words at the stack top, where
+        a call passes them. As arguments they are varied, chased and learned as pointers as the
+        registers are; as memory cells (before VERSION 36) the chase left them alone (args_room), and
+        on i386, where cdecl passes every argument on the stack, gizmo's script_run kept the length
+        its search had once given a pointer: every run of its xor arm went on for half a billion bytes
+        and was dropped."""
+        fn = self.program.by_entry.get(entry)
+        return len(self.layout.arg_regs) + (self.stack_words(fn) if fn is not None else 0)
+
+    def arg_room(self, entry):
+        """(low, high): the bytes above the stack top that hold the function's stack arguments when a
+        case gives them as arguments (arg_count), which therefore are no memory cell; None without."""
+        n = self.arg_count(entry) - len(self.layout.arg_regs)
+        return (self.layout.stack_top, self.layout.stack_top + self.layout.word * n) if n else None
+
     def stub_words(self, entry):
         """stack_words of the function at a callee's entry: the stack arguments its stub logs, as the
         argument registers of reads_mask (0 where the entry is no function's)."""
@@ -2120,7 +2140,7 @@ class Generator:
         if not cases or not reach & set(sites):
             return cases, None
         kept, pin_args, pin_mem = [], set(), set()
-        nregs, fake, code = len(self.layout.arg_regs), self.fake_pointer, self.fake_code(entry)
+        nregs, fake, code = self.arg_count(entry), self.fake_pointer, self.fake_code(entry)
         for case in cases:
             ended, targets = self._wild_run(entry, case, limit, sites)
             if not targets:
@@ -2258,7 +2278,7 @@ class Generator:
         setters = self.flag_setters(words)
         readers = {at: read for at, read in setters.values()}
         runs, cost, total = [0], [0], [0, 0]
-        nregs = len(lay.arg_regs)
+        nregs = self.arg_count(entry)
 
         def spent():
             return runs[0] >= SOLVE_RUNS or cost[0] >= SOLVE_COST or \
@@ -2706,7 +2726,7 @@ class Generator:
         width, chase_set = self.arch.reg_bits // 8, set(self.chase_buffers)
         from dread.emu import ARGS_ROOM
         args_room = (self.layout.stack_top, self.layout.stack_top + ARGS_ROOM)
-        nregs = len(self.layout.arg_regs)
+        nregs = self.arg_count(entry)
 
         def first_reads(case):
             """{address: the word first read there} of a run of case, outside the stack and the image."""
@@ -3202,9 +3222,10 @@ class Cells(dict):
     reading 0x08000000 whatever the compare-guided stage set (its portMAX_DELAY path stayed unrun;
     half of a build's functions had such inputs)."""
 
-    def __init__(self):
+    def __init__(self, exclude=None):
         super().__init__()
         self._owner = {}                    # byte address -> the address of the cell holding it
+        self.exclude = exclude              # (low, high): bytes that are no cell (the stack arguments)
 
     def full(self):
         return len(self) >= MAX_CELLS
@@ -3217,7 +3238,7 @@ class Cells(dict):
         to three bytes off now and then; when the first run to reach a buffer read it so, its cells
         were misaligned for good, and the aligned runs read half a cell and half nothing (an
         object's vtable pointer never became a whole input word: C++ on RISC-V)."""
-        if self.get(a, 0) >= n:
+        if self.get(a, 0) >= n or self.exclude and a < self.exclude[1] and a + n > self.exclude[0]:
             return
         over = {self._owner[b] for b in range(a, a + n) if b in self._owner}
         partial = [o for o in over if o < a or o + self[o] > a + n]

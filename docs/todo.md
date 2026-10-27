@@ -6413,9 +6413,9 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
     both builds lifts but the startup and GCC's main (it aligns esp): 44 of 46 on GCC's build, 45 on
     clang's. A jump through a table is a switch over the index its bound check takes (script_run;
     clang's dispatch, its handlers inlined), GCC's dispatch a tail call through the pointer it loads
-    (switches.pointer_tail now also where the call pushed the return address). The lift check accepts 42
-    of GCC's functions (41 until dispatch's tail call was made a jump, below) and 43 of clang's; ram_crc
-    runs from RAM, and script_run is dropped by its cases (below).
+    (switches.pointer_tail now also where the call pushed the return address). The lift check accepts every
+    function that lifts but ram_crc, which runs from RAM: 43 of GCC's and 44 of clang's since generator
+    VERSION 36 (41 and 43 at first: dispatch and script_run, below).
     The fuzzer's x86 ISA (dread liftfuzz --isa x86: every width of the arithmetic with the flags, the
     shifts, mul, imul, div, setcc, cmovcc, lea, xchg, frame slots, push and pop, branches, cdecl calls)
     agrees on 800 random functions of 40 instructions (seeds 21 to 28, the last three on the final code).
@@ -6431,7 +6431,7 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
     whose callers read it (edx is no argument register: the C's edx at a call is its compiler's), and a
     case generator that has nothing to vary (no argument, load or call: uart_init).
   - [x] Readable C on gizmo-i386 (2026-10-27): every lifted function of both builds passes dread readable
-    --check (GCC's 41, clang's 43). What it took: eax handed in with -mregparm=1 from dread.build's REGPARM
+    --check (GCC's 43, clang's 44 since generator VERSION 36; 41 and 43 before). What it took: eax handed in with -mregparm=1 from dread.build's REGPARM
     line instead of an attribute in the C's head: the readable passes write heads anew by pattern, read_line's
     lost its regparm(1) when the types pass gave it another type, and every argument was read a word off.
   - [x] GCC's dispatch on i386 (2026-10-27): its handlers, tail-called through the pointer it loads, pass
@@ -6443,9 +6443,15 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
     each written back into its own slot (where a callee would not write them, the cases see it).
     dread.cparse reads a statement attribute in front of a return, and void_results leaves such a
     return whole.
-  - [ ] script_run on i386 (both builds): the generated cases miss an arm of its switch (index 1 on GCC's
-    build: no input made keys_read's register come out 1 in its low three bits), where every ARM and
-    RISC-V build's cases reach every arm. Not looked into further: why the search does not draw it here.
+  - [x] script_run on i386 (both builds, 2026-10-27, generator VERSION 36): the generated cases missed an
+    arm of its switch (index 1 on GCC's build), where every ARM and RISC-V build's cases reach every arm.
+    The cause was not the switch: the generator learned the function's arguments, stack words on i386,
+    as memory cells, which the chase leaves alone, and the length kept the scratch pointer the search had
+    once given it, so every run of the xor arm went on for half a billion bytes and was dropped (dread
+    uncovered: forced into the arm, a run returned after four instructions). A case's args now hold the
+    stack arguments behind the argument registers (Generator.arg_count; Machine.call writes them at the
+    stack top), varied, chased and learned as pointers as registers are: every arm is reached, and both
+    builds accept every function that lifts but ram_crc (tests/test_x86.py, tests/test_autocase.py).
   - [ ] mul64's width: its written cases compare edx, which no caller in the image reads, so the lift
     check takes it as one word (the dread.regflow width of a function nobody calls).
   - [ ] The parity and auxiliary flags (jp, setnp, lahf, pushfd: refused), string instructions with a

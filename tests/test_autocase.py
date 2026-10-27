@@ -1902,3 +1902,20 @@ def test_answers_give_a_system_register_a_value(tmp_path):
     assert after == words, sorted(hex(a) for a in words - after)
     made = next(c for c in new if gen.coverage(fn.entry, fn.insns, c) - before)
     assert made.get("sysregs", {}).get("ipsr", 0) >= 16 and made.get("answer"), made
+
+
+def test_stack_arguments_are_arguments_of_the_cases():
+    """A function's stack arguments come behind its argument registers in its cases' args
+    (Generator.arg_count), where the chase, the learned pointers and the stages that vary arguments
+    reach them: gizmo's sum6 takes four registers and two stack words on ARM, six stack words on i386
+    (cdecl), and the words they take above the stack top are no memory cell (arg_room)."""
+    for variant, regs in (("m3", 4), ("i386", 0)):
+        t = Target.load(gizmo_dir(variant))
+        g = Generator(t, t.image())
+        fn = g.program.by_name["sum6"]
+        assert g.arg_count(fn.entry) == 6, variant
+        low, high = g.arg_room(fn.entry)
+        assert (low, high - low) == (g.layout.stack_top, 4 * (6 - regs)), variant
+        clamp = g.program.by_name["clamp"]      # (three arguments: registers alone on ARM)
+        want = None if regs else (g.layout.stack_top, g.layout.stack_top + 12)
+        assert g.arg_room(clamp.entry) == want, variant
