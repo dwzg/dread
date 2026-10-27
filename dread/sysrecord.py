@@ -9,10 +9,11 @@ everything the call reads until it returns:
               value (callees included: they run for real when the case is replayed);
   frames      what the call reads of its callers' frames (above its stack pointer at entry, below
               the highest one its context had: a task's stack is small, and what lies above it, its
-              TCB or other data, is memory): when an argument register points there (a local buffer
-              of the caller), those frames move into scratch memory (FRAME_RELOC) with the argument,
-              since the harness's own stack lies where the firmware's did; otherwise the words just
-              above the stack pointer are stack arguments;
+              TCB or other data, is memory): the words just above the stack pointer, behind the
+              return address where the call pushed one (x86: the layer's entry_stack_args), are stack
+              arguments; when an argument, a register or such a word, points into those frames (a
+              local buffer of the caller), the frames move into scratch memory (FRAME_RELOC) with the
+              argument, since the harness's own stack lies where the firmware's did;
   devices     every peripheral register as the sequence of values it read, as poll stages (the case
               field "poll": from the n-th read on, this value).
 
@@ -156,10 +157,11 @@ class Recorder:
                 call["own"] = call["lo"] <= addr < call["hi"]
                 if call["expect"] is not None and call["call_args"] is None and not call["own"]:
                     # the callee's first block: the argument registers are the call's (the block that
-                    # ends with the call sets them up itself: add r3, sp, #8; bl)
-                    word = self.layout.word
+                    # ends with the call sets them up itself: add r3, sp, #8; bl), then its stack
+                    # arguments, behind the return address where the call pushed one (x86)
+                    word, first = self.layout.word, sp + self.layout.entry_stack_args
                     call["call_args"] = [uc.reg_read(r) for r in self.layout.arg_regs] + [
-                        int.from_bytes(uc.mem_read(sp + word * k, word), "little") for k in range(STACK_ARGS)]
+                        int.from_bytes(uc.mem_read(first + word * k, word), "little") for k in range(STACK_ARGS)]
                 if call["expect"] == addr:
                     call["answers"].append(uc.reg_read(self.layout.result_regs[0]))
                     call["sites"].append(call["site"])
@@ -261,12 +263,26 @@ class Recorder:
         uc, lay, sp = self.uc, self.layout, call["sp"]
         args, mem, later = list(call["args"]), dict(call["mem"]), [list(x) for x in call["later"]]
         top = min(sp + FRAME_SPAN, self.tops.get(call["context"], 0))
+        # The words between sp and the first stack argument hold the return address the call pushed
+        # (x86: entry_stack_args), which ret reads: the harness's call pushes its own. The stack
+        # arguments the call read (STACK_ARGS words from there) follow the argument registers; then a
+        # pointer among all of them into the callers' frames moves those frames into scratch memory.
+        # Until 2026-10-27 the words counted from sp (the return address came first on x86), and only
+        # the registers were looked at for such a pointer (on x86 none: cdecl passes no register).
+        first = sp + lay.entry_stack_args
+        frame = {a: sv for a, sv in call["frame"].items() if a >= first}
+        nregs = len(lay.arg_regs)
+        for a in sorted(frame):
+            k = (a - first) // 4
+            if k < STACK_ARGS:
+                while len(args) < nregs + k + 1:
+                    args.append(int.from_bytes(uc.mem_read(first + 4 * (len(args) - nregs), 4), "little"))
         pointers = [i for i, v in enumerate(args) if sp <= v < top]
         scratch = lay.target.memory.scratch_base
         in_frames = [x for x in later if sp <= x[0] < top]
         if pointers and scratch is not None:
             base = scratch + FRAME_RELOC
-            for a, sv in call["frame"].items():
+            for a, sv in frame.items():
                 mem[base + (a - sp)] = sv
             for i in pointers:
                 args[i] = base + (args[i] - sp)
@@ -275,12 +291,8 @@ class Recorder:
         else:
             if in_frames:
                 return                      # a stage of a stack argument: the harness's stack is elsewhere
-            for a, sv in call["frame"].items():
-                k = (a - sp) // 4
-                if k < STACK_ARGS:
-                    while len(args) < len(lay.arg_regs) + k + 1:
-                        args.append(int.from_bytes(uc.mem_read(sp + 4 * (len(args) - len(lay.arg_regs)), 4), "little"))
-                else:
+            for a, sv in frame.items():
+                if (a - first) // 4 >= STACK_ARGS:
                     mem[a] = sv
         if any(lay.stack_top - lay.stack_size <= a < lay.stack_top + 0x100 for a in list(mem) + [x[0] for x in later]):
             self.dropped = getattr(self, "dropped", 0) + 1

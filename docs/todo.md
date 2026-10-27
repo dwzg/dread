@@ -6431,9 +6431,15 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
       the APIC for the bench's IA32 builds), the instructions behind which Unicorn ends a block (sti, popfd:
       ends_block, to measure); then gizmo-i386's keys and config scenarios (bytes from the UART reach main's
       ring through its interrupt) and the timer.
-    - [ ] sysrecord on x86: a recorded call's stack arguments start behind the return address
-      (entry_stack_args: dread.sysrecord counts the frame's words from sp, so the return address would be
-      the first argument), and the loop answers' call_args the same.
+    - [x] sysrecord on x86 (2026-10-27): a recorded call's stack arguments start behind the return
+      address (entry_stack_args; dread.sysrecord counted the frame's words from sp, and the return address,
+      which ret reads, came first), the loop answers' call_args the same, and a pointer into the callers'
+      frames is looked for among the stack arguments too (cdecl passes none in a register, so fmt_hex's
+      buffer, main's local, was never moved to scratch memory and its recording read the harness's
+      stack). On gizmo-i386's boot: clamp, fmt_hex, apply_config and uart_puts recorded, every recording
+      replays with the run's result (none before) and runs every instruction. On ARM and RISC-V the stack
+      arguments now join the case where a register points into the frames, as they did where none did.
+      tests/test_x86.py: sysrecord_takes_the_stack_arguments (fails with the old sysrecord).
     - [ ] The extents' owner table (Program.owners) counts halfwords: on x86 the halfword in which one
       function ends and the next begins at an odd byte counts as the next one's, so a load from the
       first one's last byte would count as a read of another function's code (not confirmed to happen:

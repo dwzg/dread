@@ -2064,3 +2064,31 @@ def test_gizmo_i386_boots_alike_and_a_planted_bug_shows(tmp_path):
     diff = sysrun.compare(a, b)
     assert diff and diff[0].startswith("device logs differ"), diff
     assert "crc" in a.reports["uart"]["sent"] and a.reports != b.reports
+
+
+def test_sysrecord_takes_the_stack_arguments_behind_the_return_address(tmp_path):
+    """dread sysrecord on gizmo-i386's boot: cdecl passes every argument on the stack, behind the return
+    address the call pushed. clamp(value, 0, 9) and fmt_hex(buf, crc, 8) are recorded with their three
+    stack words as arguments, fmt_hex's buf (main's local) moved into scratch memory with main's frame,
+    and both replay in the harness with the result the run saw. Until 2026-10-27 sysrecord counted the
+    words from sp (the return address came first) and looked for a pointer into the callers' frames among
+    the argument registers only: no recorded call replayed with the run's result."""
+    if not _compiles("i386", tmp_path):
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import sysrecord
+    from dread.target import Target
+    target = Target.load(gizmo_dir("i386"))
+    image = target.image()
+    image.extra_cases = str(tmp_path / "extra")
+    lines = []
+    kept = sysrecord.record(target, image, ["clamp", "fmt_hex"], dict(target.scenarios["boot"], _name="boot"),
+                            keep_all=True, out=lines.append)
+    assert "clamp" in kept and "fmt_hex" in kept, lines
+    clamp = kept["clamp"][0]
+    assert clamp["args"][1:] == [0, 9], clamp["args"]
+    fmt = kept["fmt_hex"][0]
+    scratch = target.memory.scratch_base
+    assert len(fmt["args"]) == 3 and scratch <= fmt["args"][0] < scratch + 0x20000 and fmt["args"][2] == 8, fmt["args"]
+    for line in lines:
+        if line.startswith(("clamp ", "fmt_hex ")):
+            assert " 1 calls recorded, 1 replay with the same result, 1 kept;" in line, line
