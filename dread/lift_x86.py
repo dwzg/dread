@@ -321,6 +321,66 @@ class X86Lifter(lift.Lifter):
         self._stack_args[fn.name] = top
         return top
 
+    def walks_stack_args(self, fn):
+        """Whether fn reads its stack arguments at a place it computes: it takes the address of one
+        (va_start: it reads on through the words behind it with a pointer, as many as each call passes;
+        GCC 15's lea ebx, [ebp + 0xc]), or indexes into them (GCC 13 made the same va_arg loop
+        mov ecx, dword ptr [ebp + eax*4 + 0xc]). Its own accesses (stack_args) see the named ones alone."""
+        key = getattr(fn, "key", fn.name)
+        cache = self.__dict__.setdefault("_walks", {})
+        if key not in cache:
+            cache[key] = False
+            try:
+                states = self.states(fn, strict=False, switch=True)
+            except Refused:
+                return False
+            for a, (depth, values) in states.items():
+                insn = self.prog.insn(a)
+                made = self.made_value(insn, depth, values)
+                if made is not None and isinstance(made[1], tuple) and made[1] and made[1][0] == "sp" \
+                        and made[1][1] <= -4:
+                    cache[key] = True
+                    break
+                if insn.mnemonic != "lea" and any(self._indexed_arg(insn, op, depth, values)
+                                                  for op in insn.operands):
+                    cache[key] = True
+                    break
+        return cache[key]
+
+    def _indexed_arg(self, insn, op, depth, values):
+        """Whether a memory operand indexes into the stack arguments: a base register that holds a frame
+        address, an index register, and a fixed part that starts at or above the first stack argument."""
+        if op.type != X.X86_OP_MEM or not self._index(insn, op) or op.mem.segment or not op.mem.base:
+            return False
+        name = self._reg(insn, op.mem.base)
+        v = ("sp", depth) if name == "sp" else values.get(name)
+        return isinstance(v, tuple) and len(v) == 2 and v[0] == "sp" and v[1] - op.mem.disp <= -4
+
+    def set_up_words(self, fn, states, insn):
+        """How many words from the stack pointer up the code in front of a call stored, one after the
+        other: walked back from the call to the call before it, a branch target or the entry (a word
+        stored before a place other code jumps to, or left from an earlier call, is not counted)."""
+        order = sorted(a for a in fn.insns if a in states)
+        targets = set()
+        for a in order:
+            kind, target, _ = self.arch.flow(self.prog.insn(a))
+            if kind == "jump" and isinstance(target, int):
+                targets.add(target)
+        written = set()
+        for a in reversed(order[:order.index(insn.address)]):
+            i = self.prog.insn(a)
+            if self.arch.flow(i)[0] in ("call", "icall"):
+                break
+            depth, values = states[a]
+            written |= {s for s, size, read, wrote in self._accesses(fn, i, depth, values, calls=False)
+                        if wrote and size == 4}
+            if a in targets:
+                break
+        d, n = states[insn.address][0], 0
+        while d - 4 * n in written:
+            n += 1
+        return n
+
     def _accesses(self, fn, insn, depth, values, calls=True):
         """[(slot, size, read, written)]: the stack bytes an instruction reads or writes whose place the
         analysis knows: memory operands through esp or through a register that holds a frame address,
@@ -377,9 +437,25 @@ class X86Lifter(lift.Lifter):
             if callee is fn:
                 callee = None
         if callee is not None:
-            for k in range(self.stack_args(callee) or 0):
+            for k in range(self.call_words(fn, insn, callee, tail) or 0):
                 out.append((depth - 4 - 4 * k if tail else depth - 4 * k, 4, True, False))
         return out
+
+    def call_words(self, fn, insn, callee, tail=False, states=None):
+        """How many stack words a call of callee passes: those callee reads itself (stack_args), or for
+        one that walks its stack arguments (walks_stack_args: printf) at least those the call site stored
+        (set_up_words). The frame analysis (_accesses: which pushes the C must store) and the C's call
+        (_call) and the frame's top (frame_effects: the words saves_out leaves out) take the same count:
+        with the callee's own count there and the call site's in the call, the C passed printf words it
+        never stored (UngatedMoveToScreenPosition's 0x1b, row and column were pushes nobody read)."""
+        n = self.stack_args(callee)
+        if n is None or tail or not self.walks_stack_args(callee):
+            return n
+        try:
+            states = states if states is not None else self.states(fn, strict=False, switch=True)
+            return max(n, self.set_up_words(fn, states, insn), 1)
+        except Refused:
+            return n
 
     # ---- the frame's top (dread.lift's saves_out) ----
 
@@ -439,7 +515,7 @@ class X86Lifter(lift.Lifter):
             callee = self.prog.by_entry.get(target)
         if kind in ("call", "icall"):
             fx.hands |= self._takes_eax(callee) | (set(self.leaves(callee)) if callee is not None else set())
-            n = (self.stack_args(callee) or 0) if callee is not None else min(depth // 4, INDIRECT_STACK_WORDS)
+            n = (self.call_words(fn, insn, callee) or 0) if callee is not None else min(depth // 4, INDIRECT_STACK_WORDS)
             fx.words += [(4 * k, 4) for k in range(n) if 4 * k < depth]   # (_call, _icall)
             fx.writes |= set(self.after_call(insn))
             fx.loaded |= set(self.after_call(insn)) - {"flags"}
@@ -960,6 +1036,18 @@ class X86Lifter(lift.Lifter):
         width = self._width(callee.name)
         d = self.ctx["depth"][insn.address]
         tail = self.arch.flow(insn)[0] == "jump"
+        if tail and self.walks_stack_args(callee):
+            raise Refused("0x%x jumps to %s, which walks its stack arguments (as many as its caller passed)"
+                          % (insn.address, callee.name))
+        variadic = not tail and self.walks_stack_args(callee)
+        if variadic:
+            # a va_list reads as many words as the call passes: those the call site stored (printf's
+            # format and the words its conversions take), and the C declares the callee variadic,
+            # which GCC passes on the stack whatever the regparm (so eax is no argument of it)
+            if self._takes_eax(callee):
+                raise Refused("0x%x calls %s, which walks its stack arguments and reads eax" % (
+                    insn.address, callee.name))
+            nstack = self.call_words(self.ctx["fn"], insn, callee)
         if tail and d:
             raise Refused("0x%x jumps to %s with %d bytes of its own on the stack (the callee returns through "
                           "them)" % (insn.address, callee.name, d))
@@ -972,8 +1060,8 @@ class X86Lifter(lift.Lifter):
             if back is not None:
                 raise Refused("0x%x reads a stack word that the call at 0x%x passed to %s, which may change it "
                               "(the C passed a copy)" % (back, insn.address, callee.name))
-        self.ctx["callees"].add((callee.name, nstack, width))
-        call = "%s(%s)" % (callee.name, ", ".join(["eax"] + words))
+        self.ctx["callees"].add((callee.name, -1 if variadic else nstack, width))
+        call = "%s(%s)" % (callee.name, ", ".join(([] if variadic else ["eax"]) + words))
         keep = set(self.flow.preserved_regs(callee.name)) if self.flow else set()
         scratch = [r for r in ("ecx", "edx") if r not in RESULTS[width] and r not in keep]
         clear = ("%s = 0; " % " = ".join(scratch) if scratch else "") + "cf = zf = sf = of = 0;"
@@ -1065,7 +1153,8 @@ class X86Lifter(lift.Lifter):
             widest[name] = max(widest.get(name, 1), width)
             words[name] = nstack
         for name, width in sorted(widest.items()):
-            lines.append("extern %s %s(%s);" % (CTYPES[width], name, ", ".join(["u32"] * (1 + words[name]))))
+            params = "u32, ..." if words[name] < 0 else ", ".join(["u32"] * (1 + words[name]))
+            lines.append("extern %s %s(%s);" % (CTYPES[width], name, params))
         params = ["u32 eax_in"] + ["u32 sa%d" % k for k in range(ctx["stack_params"])]
         lines.append("%s %s(%s)" % (CTYPES[self._width(fn.name)], fn.name, ", ".join(params)))
         lines.append("{")

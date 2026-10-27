@@ -6493,12 +6493,20 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         the lifter takes eax alone and refuses those that read edx or ecx (15) and their callers (about
         25). Each lifted file has one convention (dread.build's REGPARM line): one with regparm(3) for
         such a function, and its callees' declarations their own.
-      - [ ] Calls of a variadic function: the words a call passes come from the callee's stack analysis,
-        which for printf sees the format alone; the original pushes the format, the file and the line,
-        the C passed one word, printf read a file name from elsewhere and prints faulted (323 of the
-        first round's failing cases, every one through vAssertCalled). Where the callee walks its
-        stack arguments through a pointer (va_start: "takes the address of a stack argument"), the call
-        passes what the call site stored since its previous call.
+      - [x] Calls of a variadic function (2026-10-27): the words a call passes came from the callee's
+        stack analysis, which for printf sees the format alone; the original pushes the format, the file
+        and the line, the C passed one word, printf read a file name from elsewhere and prints faulted
+        (323 of the first round's failing cases, every one through vAssertCalled). A callee that walks
+        its stack arguments through a pointer (va_start: X86Lifter.walks_stack_args) gets the words the
+        call site stored one after the other from the stack pointer up since the call before it, a
+        branch target or the entry (set_up_words), and is declared variadic (u32 f(u32, ...)), which
+        GCC passes on the stack whatever the regparm, so eax is no argument of it; a tail call to one is
+        refused. vAssertCalled, xQueueGenericCreate and vQueueDelete then pass, and readable C reads
+        printf(0x10d1b4u, ebx, esi) (tests/test_x86.py: a variadic total and its caller).
+      - [ ] A stub of a printf-family callee on i386 logs its named words alone (stub_words: the
+        callee's own stack analysis); its format's words are stack words there, which format_mask
+        (registers) does not see. Only where printf is stubbed (a run hung in it): it mostly runs for
+        real, and what it prints is compared.
       - [ ] int N (16): FreeRTOS's yield (int 0x50, portYIELD); as RISC-V's ecall and ARM's svc, a logged
         system call in the emulator (Unicorn reports int N and CPU exceptions alike: the hook tells int N
         by its bytes in front of eip) and inline assembly in the C.

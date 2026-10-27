@@ -216,6 +216,107 @@ def test_untyped_labels_padding_and_the_listing(tmp_path, capsys):
     assert "written raw from the start" in out and "pass 2" not in out, out
 
 
+SMALL_FLAGS = ["-m32", "-march=i686", "-mno-80387", "-mno-mmx", "-mno-sse", "-fno-pic", "-fno-pie", "-Os",
+               "-ffreestanding", "-fno-builtin", "-ffunction-sections", "-fno-common",
+               "-fno-asynchronous-unwind-tables", "-fno-stack-protector"]
+
+
+def small_i386(tmp_path, source, name="small"):
+    """A target of its own from one C file, built with the host's GCC (-m32) as gizmo-i386 is: the code
+    at 0x08000000, the zeroed data at 0x20000000, imported (dread import-elf). None without the host's
+    32-bit GCC."""
+    if not _compiles("i386", tmp_path):
+        return None
+    from dread import elfimport
+    from dread.target import Target
+    root = tmp_path / name
+    (root / "original").mkdir(parents=True)
+    toml = HEADER_TOML.replace('name = "header-i386"', 'name = "%s"' % name) \
+        .replace("0x00100000", "0x08000000").replace("0x00110000", "0x08010000") \
+        .replace('{name = "ram", base = 0x00200000', '{name = "ram", base = 0x20000000') \
+        .replace("top = 0x00210000", "top = 0x20010000") \
+        .replace('cflags = ["-m32", "-march=i686", "-fno-pic", "-fno-pie", "-Os", "-ffreestanding"]',
+                 "cflags = [%s]" % ", ".join('"%s"' % f for f in SMALL_FLAGS))
+    (root / "dread.toml").write_text(toml)
+    c, elf = tmp_path / ("%s.c" % name), root / "original" / "image.elf"
+    c.write_text(source)
+    subprocess.run(["gcc"] + SMALL_FLAGS + ["-nostdlib", "-static", "-no-pie", "-Wl,--build-id=none",
+                    "-Wl,-Ttext=0x08000000", "-Wl,-Tbss=0x20000000", "-o", str(elf), str(c)], check=True)
+    assert elfimport.main([str(elf), "--target", str(root), "--payload", str(root / "original" / "image.bin"),
+                           "--write-startup"]) == 0
+    return Target.load(str(root))
+
+
+VARIADIC_C = r"""
+#include <stdarg.h>
+typedef unsigned int u32;
+volatile u32 sink[4];
+
+__attribute__((noinline)) u32 total(u32 n, ...)
+{
+    va_list ap;
+    u32 s = 0, i;
+    va_start(ap, n);
+    for (i = 0; i < n; i++)
+        s += va_arg(ap, u32) * (i + 1);
+    va_end(ap);
+    sink[0] = s;
+    return s;
+}
+
+u32 caller(u32 a, u32 b, u32 c)
+{
+    return total(3, a, b, c) + total(1, a ^ b);
+}
+
+void _start(void)
+{
+    sink[1] = caller(1, 2, 3);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_call_of_a_variadic_function_passes_what_the_call_site_stored(tmp_path, monkeypatch, capsys):
+    """total(n, ...) walks its stack arguments with a va_list (GCC 15 takes the address of n, GCC 13
+    indexes into the words behind it), so the words a call of it passes are those its caller stored, not
+    those total reads itself (n alone): caller's C stores and passes four words to the first call and
+    two to the second, declares total variadic (which GCC passes on the stack whatever the regparm), and
+    its lift check agrees. Without, each call passed eax and one word, and the frame analysis, counting
+    total's own reads, took the pushes of the words behind n for nobody's and left them out; the cases
+    here agreed even so, by luck of the layout (the C's frame array mirrors the original's, so total read
+    on into the words the original pushed): FreeRTOS's vAssertCalled, whose frame lay otherwise, handed
+    printf a file name from elsewhere, and UngatedMoveToScreenPosition printed no escape character."""
+    target = small_i386(tmp_path, VARIADIC_C, "variadic")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import lift, lift_x86, regflow
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    assert lifter.walks_stack_args(program.by_name["total"])
+    assert not lifter.walks_stack_args(program.by_name["caller"])
+    text = lifter.lift(program.by_name["caller"]).text
+    assert "extern u32 total(u32, ...);" in text, text
+    lines_ = text.split("\n")
+    calls = [k for k, line in enumerate(lines_) if "= total(" in line]
+    assert sorted(lines_[k].split("= total(")[1].count("volatile u32") for k in calls) == [2, 4], calls
+    import re
+    for k in calls:                         # every word passed is one the C stored (the frame analysis counts it)
+        for slot in re.findall(r"sp0 - (\d+)", lines_[k].split("= total(")[1]):
+            assert any("*(volatile u32 *)((u32)(sp0 - %s)) = " % slot in line for line in lines_[:k]), (slot, text)
+    lines = []
+    assert lift.check(target, image, ["caller"], out=lines.append, jobs=2) == ["caller"], lines
+    monkeypatch.setattr(lift_x86.X86Lifter, "walks_stack_args", lambda self, fn: False)
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    text = lifter.lift(program.by_name["caller"]).text
+    calls = [line for line in text.split("\n") if "= total(" in line]
+    assert all(line.split("= total(")[1].startswith("eax, ") and line.count("volatile u32") == 1
+               for line in calls), calls
+
+
 @pytest.mark.parametrize("which", ["i386", "i386clang"])
 def test_gizmo_i386_rewritten_functions_agree(which, tmp_path):
     """The rewritten C over the original, every argument on the stack: functions that do not fit move
