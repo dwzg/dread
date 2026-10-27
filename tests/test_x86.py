@@ -1388,7 +1388,7 @@ def test_the_time_stamp_counter_is_the_emulators(tmp_path):
     image = target.image()
     gen = Generator(target, image)
     spin = gen.program.by_name["spin"]
-    ticks, rounds, reads = 0x50000, [], []
+    ticks, rounds, reads = 5 * emu.COUNTER_STEP, [], []
     for slow in (False, True):
         m = gen.machine()
         m.plan = []

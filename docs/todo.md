@@ -6700,7 +6700,9 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
       - [x] The time-stamp counter (2026-10-27): dread.emu hooks every place an rdtsc could start (each
         0f 31 in an image's bytes: a code hook fires only where an instruction starts) and answers the
         n-th read of a run with COUNTER_START + n * COUNTER_STEP, logged as a device access ("counter
-        read"), the same in both images; Unicorn cannot hook rdtsc as an instruction (UC_ERR_ARG). The
+        read"), the same in both images (COUNTER_STEP 1 << 24 since a measurement the same day: with 0x10000
+        FreeRTOS's half-second delays took 3000 rounds of a 64-bit division each, and the GCC -Os build lost
+        two functions whose cases ended in them at the limit); Unicorn cannot hook rdtsc as an instruction (UC_ERR_ARG). The
         lifter writes rdtsc as itself (dread.h's dread_rdtsc), where it refused it. No cost measured (a
         long memset: 0.884 s against 0.889 s). On a copy of the -O2 build ReadMultipleByte and
         Pcal9555SetPortRegBit pass besides; DisableI2CController misses one instruction; vMilliSecondDelay
@@ -6743,7 +6745,11 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         end, a timeout after 40000 rounds (about a million instructions), lies past the limit, and the
         long-run stage runs only where no input finishes at all. Either a pointer read from a device
         range makes its buffer a device range for the run, or a near miss that ran to the limit in a
-        loop of the function's own is tried once with the long limit.
+        loop of the function's own is tried once with the long limit. The same on the GCC -Os build:
+        WaitForStopDet's 3 instructions behind its delay call (40000 polls with a delay each; accepted
+        under the host's clock), and xTaskResumeAll's pending-ready loop: the answer that sets the list's
+        count enters it (45 new instructions), and the loop goes on while the count stays, which an answer
+        of the old value at the count's next read (later) would end.
       - [ ] An input that has code read stack words nothing wrote (a length past a local:
         prvNotifyQueueSetContainer copies an item of the input's size from its 4-byte local) reads the
         original's frame layout, which the C's differs from; dread.fragile refuses it only where a saved

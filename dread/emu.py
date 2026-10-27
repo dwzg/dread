@@ -42,7 +42,10 @@ IO_LOGGED = 100_000 # device accesses of one run logged one by one; later ones f
 IO_EVENTS = ("io read", "io write", "port read", "port write",   # (port: x86's in and out, Machine._on_port_in)
              "counter read")                                          # (x86's rdtsc, Machine._on_counter)
 COUNTER_START = 0x100000000     # the time-stamp counter's first answer is this plus a step (Machine._on_counter)
-COUNTER_STEP = 0x10000          # what it advances by between two reads
+COUNTER_STEP = 1 << 24          # what it advances by between two reads: about 42 ms of a 400 MHz core, so that a
+                                # delay loop ends in a few rounds (0x10000 until 2026-10-27: FreeRTOS's IA32 demo
+                                # waits half a second in 64-bit microseconds, which took 3000 rounds of a division
+                                # each, and its callers' cases ended at the limit); low 32 bits still change
 FOLD_CHUNK = 4096   # folded accesses hashed together (the digest is the same for the same accesses)
 POISON = 0xA5C3E100 # callee-saved registers start as POISON + 0x11 * (i + 1): no zero byte, so that
                     # a byte cleared in one of them shows

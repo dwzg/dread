@@ -87,7 +87,7 @@ class X86:
                                             # return address the call pushed lies between
     veneer_reg = "eax"                      # no veneers (a 5-byte jmp reaches every address); eax is where
                                             # GCC and clang mostly load a pointer they call through
-    generator_version = 8           # 2: a case gives eax, edx and ecx to a function that takes them (case_regs);
+    generator_version = 9           # 2: a case gives eax, edx and ecx to a function that takes them (case_regs);
                                     # 3: one that only pushes edx or ecx as a call's argument takes them;
                                     # 4: a case answers the ports its runs read (ports); 5: padding reads
                                     # no register (is_padding: regflow's reads, case_regs); 6: a frame
@@ -95,7 +95,8 @@ class X86:
                                     # arguments of such a function and its stubs' words are known);
                                     # 7: rdtsc reads dread.emu's counter, not the host's clock;
                                     # 8: the compare-guided stage sees x86's branches (value_step,
-                                    # store_slots, load_address, memory operands in branch_deciders)
+                                    # store_slots, load_address, memory operands in branch_deciders);
+                                    # 9: the time-stamp counter steps 1 << 24 a read (dread.emu)
     refine_saved_writes = True              # dread.regflow refines a write of ebx, esi, edi or ebp too (taken as
                                             # all used): with three scratch registers, bytes pass through them
     SWITCH_MAX = 1024                       # table entries read at most
