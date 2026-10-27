@@ -606,8 +606,10 @@ class Generator:
     # ---- applying a case ----
 
     def apply(self, m, case):
-        """Put a case into a machine: memory, peripheral answers, generic stubs."""
+        """Put a case into a machine: memory, peripheral answers, generic stubs, and the registers its
+        first arguments go to (its regs: case_regs), which the machine's next call takes."""
         lay = self.layout
+        m.call_regs = case.get("regs")
         for base, size in case.get("map", ()):     # pages of its own, before its memory (a page its run
             m.map_page(base, size)                  # faulted at: Generator.answers' behind)
         fixed = {} if case.get("io") == "fixed" else None
@@ -658,6 +660,8 @@ class Generator:
         in_stack = lay.in_stack
         taking = self.formats()[0]
 
+        stub_regs = getattr(self.arch, "stub_regs", None)
+
         def stub(m, *args, target=0, nargs=0, nstack=0, only=None):
             if only is not None:            # it answers the calls numbered in only; the callee runs at the others
                 sp = m.reg("sp")
@@ -685,7 +689,10 @@ class Generator:
             sp = m.reg("sp")
             first = sp + lay.entry_stack_args       # (x86: behind the return address the call pushed)
             words = [int.from_bytes(m.read(first + 4 * i, 4), "little") for i in range(nstack)]
-            seen = [args[i] for i in range(len(args)) if nargs >> i & 1] + words
+            if stub_regs:                   # (x86: the registers a callee may take, as reads_mask counts them)
+                seen = [m.reg(r) for i, r in enumerate(stub_regs) if nargs >> i & 1] + words
+            else:
+                seen = [args[i] for i in range(len(args)) if nargs >> i & 1] + words
             # The registers a printf format takes are logged besides (format_mask), and only logged:
             # the fills behind pointers below go by the case's own mask, so a case made before
             # (2026-10-26) runs as it was made (counted among them, they changed the fills' seeds, and
@@ -1067,7 +1074,8 @@ class Generator:
         if not self._flow:
             return 1
         reads = set(self._flow.read_regs(name))
-        return sum(1 << i for i, r in enumerate(self.target.abi.arg_regs) if r in reads)
+        regs = getattr(self.arch, "stub_regs", None) or self.target.abi.arg_regs
+        return sum(1 << i for i, r in enumerate(regs) if r in reads)
 
     def stop_mask(self, entry):
         """The argument registers a stop logs at the call of the function at entry (a case's stops: one
@@ -1303,6 +1311,7 @@ class Generator:
         data_args, data_mem = {}, {}        # inputs learned to be data pointers -> their buffer
         words_set = set(words)
         nregs = self.arg_count(entry)       # (the argument registers, then the stack arguments)
+        case_regs = self.case_regs(entry)   # (x86: eax, edx and ecx where the function takes them)
         fregs = self.fp_inputs(name)        # float arguments in the FPU's registers (hard float)
 
         def buffer_for(slot):
@@ -1433,6 +1442,7 @@ class Generator:
 
         def fresh():
             case = {"args": [small_value() if small[0] else value() for _ in range(nregs)],
+                    **({"regs": list(case_regs)} if case_regs is not None else {}),
                     "mem": [[a, s, value()] for a, s in sorted(known.items())],
                     "returns": [value() for _ in range(8)] if calls else [], "calls": [list(c) for c in calls],
                     **({"fregs": list(fregs), "fargs": [fvalue() for _ in fregs]} if fregs else {}),
@@ -1950,6 +1960,23 @@ class Generator:
                 calls.append([fn.entry, self.reads_mask(fn.name), self.stack_words(fn)])
         return calls, stops
 
+    def case_regs(self, entry):
+        """The registers a generated case's first arguments go to where the layer says they are not the
+        ABI's (arch.case_regs over what dread.regflow finds the function reads at its entry), else None:
+        x86's cdecl passes nothing in a register, but a function that reads eax, or edx or ecx, at its
+        entry takes them (GCC's local regparm(3), LLVM's fastcc), and a case that left them as the harness
+        does gave every input of FreeRTOS's prints the same string pointer, which faulted. A case carries
+        them (its regs), and Generator.apply hands them to the machine's call."""
+        pick = getattr(self.arch, "case_regs", None)
+        fn = self.program.by_entry.get(entry)
+        flow = self.flow() if pick is not None and fn is not None else None
+        return pick(set(flow.read_regs(fn.name))) if flow else None
+
+    def reg_count(self, entry):
+        """How many of a case's arguments go to registers: case_regs', else the ABI's."""
+        regs = self.case_regs(entry)
+        return len(regs) if regs is not None else len(self.layout.arg_regs)
+
     def arg_count(self, entry):
         """How many arguments a case gives the function at entry: its argument registers, then its
         stack arguments (stack_words), which Machine.call writes into the words at the stack top, where
@@ -1959,12 +1986,12 @@ class Generator:
         its search had once given a pointer: every run of its xor arm went on for half a billion bytes
         and was dropped."""
         fn = self.program.by_entry.get(entry)
-        return len(self.layout.arg_regs) + (self.stack_words(fn) if fn is not None else 0)
+        return self.reg_count(entry) + (self.stack_words(fn) if fn is not None else 0)
 
     def arg_room(self, entry):
         """(low, high): the bytes above the stack top that hold the function's stack arguments when a
         case gives them as arguments (arg_count), which therefore are no memory cell; None without."""
-        n = self.arg_count(entry) - len(self.layout.arg_regs)
+        n = self.arg_count(entry) - self.reg_count(entry)
         return (self.layout.stack_top, self.layout.stack_top + self.layout.word * n) if n else None
 
     def stub_words(self, entry):

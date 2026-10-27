@@ -79,7 +79,7 @@ class X86:
                                             # return address the call pushed lies between
     veneer_reg = "eax"                      # no veneers (a 5-byte jmp reaches every address); eax is where
                                             # GCC and clang mostly load a pointer they call through
-    generator_version = 1                   # in the generated-case cache's key: bump when the hints change
+    generator_version = 2           # 2: a case gives eax, edx and ecx to a function that takes them (case_regs)
     refine_saved_writes = True              # dread.regflow refines a write of ebx, esi, edi or ebp too (taken as
                                             # all used): with three scratch registers, bytes pass through them
     SWITCH_MAX = 1024                       # table entries read at most
@@ -197,6 +197,19 @@ class X86:
     UNLIKELY = frozenset(("in", "out", "insb", "insw", "insd", "outsb", "outsw", "outsd", "cli", "sti", "hlt",
                           "lgdt", "lidt", "lldt", "ltr", "arpl", "bound", "into", "das", "daa", "aas", "aaa",
                           "aam", "aad", "salc"))
+
+    stub_regs = ("eax", "edx", "ecx")      # what a stub may log of a callee's registers (dread.autocase's
+                                            # reads_mask: those of them it reads; the arguments a stub gets
+                                            # are stack words, cdecl's)
+
+    def case_regs(self, reads):
+        """The registers a generated case gives a function's first arguments in (dread.autocase.case_regs),
+        from what it reads at its entry (dread.regflow): eax, edx and ecx where it reads edx or ecx (GCC's
+        local regparm(3), LLVM's fastcc), eax where it reads eax alone (one argument there, or the caller's
+        eax handed back), else None (cdecl: the stack alone)."""
+        if reads & {"edx", "ecx"}:
+            return ["eax", "edx", "ecx"]
+        return ["eax"] if "eax" in reads else None
 
     def unlikely_unreferenced(self, insn):
         """Whether an instruction is unlikely in code that nothing calls and that runs on into the next

@@ -1011,8 +1011,12 @@ class Machine:
         if self.arg_domains:
             from dread.cases import confine_args
             args = confine_args(self.arg_domains, args)
-        regs = list(args[:len(lay.arg_regs)])
-        stacked = list(args[len(lay.arg_regs):])
+        # the registers the first arguments go to: a generated case's own (Generator.apply: x86's eax,
+        # edx and ecx for a function that takes them), else the ABI's; asked once, by this call
+        names, self.call_regs = getattr(self, "call_regs", None), None
+        arg_regs = [self.arch.reg_id(r) for r in names] if names is not None else list(lay.arg_regs)
+        regs = list(args[:len(arg_regs)])
+        stacked = list(args[len(arg_regs):])
         self.arch.initial_status(uc)            # before sp: on the A profile sp is banked per mode
         for name, value in sorted((self.sysregs or {}).items()):     # (a case's: sysregs, after the reset)
             rid = getattr(self.arch, "sysreg_id", lambda n: None)(name)
@@ -1021,7 +1025,7 @@ class Machine:
             uc.reg_write(rid, value & 0xFFFFFFFF)
         for reg, value in lay.fixed:            # registers that hold one value in the whole program (gp)
             uc.reg_write(reg, value)
-        for reg, value in zip(lay.arg_regs, regs):
+        for reg, value in zip(arg_regs, regs):
             uc.reg_write(reg, value & 0xFFFFFFFF)
         top = lay.stack_top - self.stack_shift
         uc.reg_write(lay.sp, top)
@@ -1052,7 +1056,7 @@ class Machine:
                 uc.reg_write(reg, POISON + 0x11 * (i + 1))
         kept = [(name, None if name == "flags" else self.arch.reg_id(name)) for name in self.kept]
         for i, (name, reg) in enumerate(kept):
-            if reg is not None and reg not in lay.arg_regs[:len(regs)]:
+            if reg is not None and reg not in arg_regs[:len(regs)]:
                 uc.reg_write(reg, KEPT_POISON + 0x11 * (i + 1))
         self.calls, self.written, self.written_ranges = [], set(), None
         self._io_logged, self._fold = 0, None

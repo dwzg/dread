@@ -6507,12 +6507,18 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         pass and polish leave such a declaration as it is, dread.shapes carries the attribute along).
         tests/test_x86.py: a static mix(a, b, c) and its caller pass the lift check and the readable gate,
         which reads return mix(esi, 7, edi) + s0.
-      - [ ] Generated cases give a regparm(3) function no register argument: x86's ABI has no argument
-        registers, so a case's arguments are stack words (Machine.call), and its eax, edx and ecx are
-        what the harness leaves; its callers vary them through their own arguments. Written cases give C
-        arguments, which Machine.call places by the ABI. Each function's convention as a fact the
-        emulator knows (the register flow's, which the generator and the runner both load) would let a
-        case put the leading arguments where the function takes them.
+      - [x] Generated cases give a function its register arguments (2026-10-27, x86 generator_version 2):
+        x86's ABI has no argument registers, so a case's arguments were stack words and its eax, edx and
+        ecx what the harness left; on the trial build 21 functions got no case at all (every input of
+        prints faulted on one string pointer) and 8 more missed the arms their registers decide. A case
+        carries the registers its first arguments go to (its regs: Generator.case_regs, the layer's
+        case_regs over dread.regflow's reads at the entry: eax, edx and ecx where the function reads edx
+        or ecx, eax where it reads eax alone), Generator.apply hands them to the machine, and Machine.call
+        puts them there, once (written cases keep their C arguments in the ABI's places).
+        tests/test_x86.py: pick(p, n, k) reaches both arms.
+        A stub logs what such a callee reads of eax, edx and ecx (the layer's stub_regs, which reads_mask
+        goes by on x86: by the ABI's argument registers, which cdecl has none of, a stub logged no
+        register argument there).
       - [x] Calls of a variadic function (2026-10-27): the words a call passes came from the callee's
         stack analysis, which for printf sees the format alone; the original pushes the format, the file
         and the line, the C passed one word, printf read a file name from elsewhere and prints faulted

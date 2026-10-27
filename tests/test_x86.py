@@ -491,6 +491,58 @@ def test_cli_sti_and_bt_lift(tmp_path):
         ["copy", "crit", "flag"], lines
 
 
+PICK_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+
+static __attribute__((noinline)) u32 pick(const u32 *p, u32 n, u32 k)
+{
+    if (n > 5)
+        return p[k & 3];
+    return n * 2;
+}
+
+u32 user2(const u32 *p, u32 n)
+{
+    return pick(p, n, n + 1) + pick(p, 3, 0);
+}
+
+void _start(void)
+{
+    sink[1] = user2((const u32 *)sink, 9);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_case_gives_a_function_its_register_arguments(tmp_path):
+    """pick(p, n, k), a static function GCC gives eax, edx and ecx, reads through the pointer in eax and
+    branches on edx: its generated cases give it those registers (dread.autocase case_regs, from what
+    dread.regflow finds it reads; the case's regs, which Generator.apply hands to the machine), vary them
+    as arguments, and reach both arms, so its lift check accepts it. Cases that left them as the harness
+    does gave every input one pointer and one count."""
+    target = small_i386(tmp_path, PICK_C, "pick")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    import json
+    from dread import lift
+    from dread.autocase import Generator
+    image = target.image()
+    gen = Generator(target, image)
+    pick = gen.program.by_name["pick"]
+    if gen.case_regs(pick.entry) != ["eax", "edx", "ecx"]:
+        pytest.skip("this GCC did not give pick its arguments in registers")
+    lines = []
+    assert lift.check(target, image, ["pick"], out=lines.append, jobs=2) == ["pick"], lines
+    with open(os.path.join(target.build, "autocases", image.name, "pick.json")) as f:
+        cases = json.load(f)["cases"]
+    assert cases and all(c.get("regs") == ["eax", "edx", "ecx"] for c in cases)
+    assert len({c["args"][1] for c in cases}) > 1 and len({c["args"][0] for c in cases}) > 1
+    # a stub of pick logs the registers it reads (stub_regs: eax, edx and ecx by reads_mask)
+    assert gen.reads_mask("pick") == 0b111, gen.reads_mask("pick")
+
+
 @pytest.mark.parametrize("which", ["i386", "i386clang"])
 def test_gizmo_i386_rewritten_functions_agree(which, tmp_path):
     """The rewritten C over the original, every argument on the stack: functions that do not fit move
