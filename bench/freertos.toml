@@ -489,7 +489,8 @@ isa = "i386"
 # APIC as memory-mapped devices (the UART's and the GPIO's registers lie where PCI configuration space,
 # read through port I/O, puts them). No device models yet. The PC's conventional memory below 640 KiB
 # is RAM on the Galileo, as on any PC: mapped, a null pointer reads zeros there, as on the board
-# (docs/decisions.md, 2026-10-27).
+# (docs/decisions.md, 2026-10-27). The Quark's PCI configuration space of bus 0 lies memory-mapped at
+# 0xe0000000 (the I2C controller's BAR0 at 0xe00aa010: GetI2CIoPortBaseAddress): a device range.
 [memory]
 regions = [
     {name = "low", base = 0x00000000, size = 0xa0000},
@@ -498,7 +499,7 @@ regions = [
     {name = "stack", base = 0x001c0000, size = 0x10000},
     {name = "scratch", base = 0x00200000, size = 0x40000},
 ]
-io = [[0xfec00000, 0xfec01000], [0xfed00000, 0xfed01000], [0xfee00000, 0xfee01000]]
+io = [[0xe0000000, 0xe0100000], [0xfec00000, 0xfec01000], [0xfed00000, 0xfed01000], [0xfee00000, 0xfee01000]]
 stack = {top = 0x001d0000, size = 0x4000}
 sentinel = 0x00f00000
 scratch = {base = 0x00200000, size = 0x40000}

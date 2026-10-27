@@ -6615,6 +6615,12 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         register is touched (saves_touched). A check that the run reads no stack byte below the entry's
         stack pointer that it did not write first would refuse it as the others are (with a Timeline
         mark at the first such read).
+      - [x] PCI configuration space as a device range (2026-10-27): the Quark keeps bus 0's
+        memory-mapped at 0xe0000000, and GetI2CIoPortBaseAddress reads the I2C controller's BAR0 at
+        0xe00aa010; unmapped, every input of the I2C and GPIO drivers faulted there. With the window
+        among the bench target's io ranges, six of them pass on the trial build (two more lack
+        coverage alone: WaitForStopDet, Pcal9555SetPortRegBit); with port I/O and the conventional
+        memory, the trial build passes 212 functions before it (from 189).
       - [ ] The case generation errors of the trial build (14): every input faulted, mostly where a
         callee polls a device through a base address the startup sets (vAssertCalled's
         ucGalileoGetchar reads the UART through a pointer that is 0 without the startup), and low memory
