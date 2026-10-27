@@ -4599,6 +4599,14 @@ undone). Other decisions are taken by the recommended option and written down in
   596 passed; Debian 13 (GCC 14.2, clang 19) one test that assumed GCC stores sp itself at -O2
   (fixed the same night: its C cases skip with the reason, an asm case has the shape).
 
+- [ ] **The suite's time on CI** (2026-10-27): the Python 3.13 job ran into the job's limit of 60 minutes
+  at 96 % of the suite (the cross compilers' install 10.5 minutes, the tests about 48; the 3.11 jobs 32
+  and 43), and the limit is 90 now (0f3a2d3). The tests run one at a time, and CI has no caches: the
+  slowest, the gizmo-i386 lift check's (165 s), makes its cases from nothing. Ways: pytest-xdist over a
+  few workers (DREAD's pools fork inside a test, so fewer of them per worker), the examples' caches
+  kept between runs (actions/cache; but CI is where a test shows it passes without them: then one job
+  without), or the suite split over jobs (by file). Measure the three on a branch before choosing.
+
 ## Performance, first pass
 
 The long runs set the pace of everything after them. Measure first, then cut.

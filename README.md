@@ -59,6 +59,7 @@ Gizmo (`examples/gizmo`) is DREAD's own test firmware, built for each architectu
 | [Compiler diversity](docs/todo.md#compiler-diversity-the-user-2026-10-20-first-on-armcortex-m-and-risc-v) | `█████████░` | 30 of 35 |
 | [Compiler lab](docs/todo.md#compiler-lab-dread-cclab-the-user-2026-10-19-before-anything-else) | `█████████░` | 9 of 10 |
 | [Phase 4: cases, mutation, coverage](docs/todo.md#phase-4-cases-mutation-coverage-rest) | `████████░░` | 16 of 19 |
+| [CI](docs/todo.md#ci) | `████████░░` | 3 of 4 |
 | [Phase 6: lifter](docs/todo.md#phase-6-lifter) | `█████████░` | 15 of 16 |
 | [The GUI for everything](docs/todo.md#the-gui-for-everything-the-user-2026-10-24) | `█████████░` | 9 of 10 |
 | [Browser view](docs/todo.md#browser-view-dread-gui-asked-for-by-the-user-on-2026-10-18) | `████████░░` | 5 of 6 |
@@ -70,7 +71,7 @@ Gizmo (`examples/gizmo`) is DREAD's own test firmware, built for each architectu
 | [Scale and robustness](docs/todo.md#scale-and-robustness) | `████░░░░░░` | 4 of 9 |
 | [Documentation and packaging](docs/todo.md#documentation-and-packaging) | `██░░░░░░░░` | 1 of 4 |
 
-Complete: [CI](docs/todo.md#ci), [Performance, first pass](docs/todo.md#performance-first-pass), [Phase 5: system run](docs/todo.md#phase-5-system-run), [Performance, second pass](docs/todo.md#performance-second-pass-2026-10-18-asked-for-by-the-user), [Performance, third pass](docs/todo.md#performance-third-pass-2026-10-19-asked-for-by-the-user), [Phase 7: reading aids, plugin, documentation](docs/todo.md#phase-7-reading-aids-plugin-documentation), [After the ARM phases](docs/todo.md#after-the-arm-phases), [Cortex-M4](docs/todo.md#cortex-m4-armv7e-m-with-fpv4-sp-the-user-2026-10-19-first-among-the-new-architectures), [C++](docs/todo.md#c).
+Complete: [Performance, first pass](docs/todo.md#performance-first-pass), [Phase 5: system run](docs/todo.md#phase-5-system-run), [Performance, second pass](docs/todo.md#performance-second-pass-2026-10-18-asked-for-by-the-user), [Performance, third pass](docs/todo.md#performance-third-pass-2026-10-19-asked-for-by-the-user), [Phase 7: reading aids, plugin, documentation](docs/todo.md#phase-7-reading-aids-plugin-documentation), [After the ARM phases](docs/todo.md#after-the-arm-phases), [Cortex-M4](docs/todo.md#cortex-m4-armv7e-m-with-fpv4-sp-the-user-2026-10-19-first-among-the-new-architectures), [C++](docs/todo.md#c).
 
 <!-- /status -->
 
