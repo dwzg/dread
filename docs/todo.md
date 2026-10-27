@@ -6577,8 +6577,8 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         and pciIOread32 pass; an x86 string instruction no longer reads the flags (the direction flag
         alone, which the ABI keeps clear: rep movsl two calls up made inl hand its flags back; regflow
         VERSION 32). tests/test_x86.py: kbd polls a status port and reads the data port.
-      - [ ] Pushes of every register, iret, rdtsc (the port's assembly and the support code: refused,
-        rightly for now).
+      - [ ] Pushes of every register, iret (the port's assembly and the support code: refused, rightly for
+        now).
       - [x] Three of the trial build's disagreements traced to their cause (2026-10-27): (1) GCC 16
         reorders two volatile loads: mov eax, [ebx + 0x38]; cmp [ebx + 0x3c], eax lifted, combine folds
         the later load into the compare and then the earlier one too (cmp mem, mem matches i386's pattern
@@ -6689,10 +6689,29 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         arguments (cdecl, a parameter it never reads: every FreeRTOS task) gets the same fill bytes in every
         input, since the fills' seed is the case's arguments; seeding them with the stub answers too changed
         none of the four loop functions the GCC build drops (tried 2026-10-27, not kept).
-      - [ ] Cases whose original runs into the limit: vGalileoLegacyGPIOInitializationForLED on the -O2
+      - [x] Cases whose original runs into the limit: vGalileoLegacyGPIOInitializationForLED on the -O2
         build failed 26 of 47 ("original: ... did not return within 200000 instructions"), while dread
-        trace runs the same cases to the end in both images: the generator's runs and the runner's
-        count the budget otherwise somewhere.
+        trace runs the same cases to the end in both images. The cause (2026-10-27): rdtsc. Unicorn
+        answers it with the host's clock, and the I2C driver the function reaches (ReadMultipleByte,
+        WaitForStopDet) waits 10000 ticks between polls: the same input ran as many rounds as the
+        emulation's speed allowed (a delay loop on it: 2284 and 2238 rounds in two runs without a hook,
+        4 and 5 with a slow one, which tracing is). The emulator answers it itself now (below); the
+        function passes the lift check on a copy of the -O2 build.
+      - [x] The time-stamp counter (2026-10-27): dread.emu hooks every place an rdtsc could start (each
+        0f 31 in an image's bytes: a code hook fires only where an instruction starts) and answers the
+        n-th read of a run with COUNTER_START + n * COUNTER_STEP, logged as a device access ("counter
+        read"), the same in both images; Unicorn cannot hook rdtsc as an instruction (UC_ERR_ARG). The
+        lifter writes rdtsc as itself (dread.h's dread_rdtsc), where it refused it. No cost measured (a
+        long memset: 0.884 s against 0.889 s). On a copy of the -O2 build ReadMultipleByte and
+        Pcal9555SetPortRegBit pass besides; DisableI2CController misses one instruction; vMilliSecondDelay
+        is refused for shrd. tests/test_x86.py: spin, at two speeds.
+      - [ ] WaitForStopDet's wait (-O2 build: 20 of its 54 instructions unrun): the status register lies
+        behind the base address the driver reads from PCI configuration space, which the generator aims
+        at a scratch buffer, plain memory, where no spin is cut and no poll stage answers; the wait's own
+        end, a timeout after 40000 rounds (about a million instructions), lies past the limit, and the
+        long-run stage runs only where no input finishes at all. Either a pointer read from a device
+        range makes its buffer a device range for the run, or a near miss that ran to the limit in a
+        loop of the function's own is tried once with the long limit.
       - [ ] An input that has code read stack words nothing wrote (a length past a local:
         prvNotifyQueueSetContainer copies an item of the input's size from its 4-byte local) reads the
         original's frame layout, which the C's differs from; dread.fragile refuses it only where a saved

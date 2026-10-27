@@ -90,7 +90,7 @@ REFUSED = {"std": "sets the direction flag",
            "lahf": "reads the flags register", "sahf": "writes the flags register",
            "pushfd": "pushes the flags register", "popfd": "pops into the flags register",
            "int3": "is a breakpoint", "ud2": "is an undefined instruction", "hlt": "halts", "iretd": "returns from an "
-           "interrupt", "rdtsc": "reads the time-stamp counter", "cpuid": "asks the core what it is",
+           "interrupt", "cpuid": "asks the core what it is",
            "pushal": "pushes every register", "popal": "pops every register", "enter": "makes a frame with enter"}
 
 
@@ -1076,6 +1076,8 @@ class X86Lifter(lift.Lifter):
             return self._string(insn, m)
         if m in ("cli", "sti"):             # (FreeRTOS's critical sections: the C masks as the original does)
             return '__asm__ volatile ("%s" ::: "memory");' % m
+        if m == "rdtsc":                    # (the instruction itself: dread.emu answers both images' alike)
+            return "{ u64 t = dread_rdtsc(); eax = (u32)t; edx = (u32)(t >> 32); }"
         if m == "bt" and ops[0].type == X.X86_OP_REG and LANES.get(insn.reg_name(ops[0].reg), (0, 0))[1] == M32:
             # the bit into cf; zf as it was, the others left undefined (and as they were in the C): the code
             # reads cf behind it (FreeRTOS's event groups: bt eax, 0x19; jae)

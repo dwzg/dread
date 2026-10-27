@@ -153,7 +153,7 @@ startup's own copy table, for instance).
 | Key | Meaning |
 |---|---|
 | `regions` | `[{name, base, size, kind}]`; `kind` is `"rom"`, `"ram"` (default) or `"alias"` (separate memory standing for a mirror; not a real mirror) |
-| `io` | `[[low, high], ...]`: peripheral ranges; every access there is logged in order and compared (x86's port space, in and out, is logged so without a range: a case's `ports` answer in) |
+| `io` | `[[low, high], ...]`: peripheral ranges; every access there is logged in order and compared (x86's port space, in and out, is logged so without a range: a case's `ports` answer in; and x86's time-stamp counter, rdtsc, which the emulator answers from a counter of its own) |
 | `stack` | `{top, size}`: the stack a called function gets |
 | `sentinel` | the return address a called function gets; the run stops when it arrives there |
 | `scratch` | `{base, size}`: memory the firmware does not use, for the buffers of generated inputs |

@@ -76,6 +76,7 @@ class X86:
     default_result = ("eax", "edx")
     profile = None
     port_instructions = (UX.UC_X86_INS_IN, UX.UC_X86_INS_OUT)    # in and out: dread.emu's port space
+    COUNTER_READ = b"\x0f\x31"              # rdtsc: dread.emu answers it (counter_sites, answer_counter)
     folds_memory_operands = True            # an instruction may read memory beside a register: a compiler may
                                             # fold two volatile loads into one and reorder them (GCC 16;
                                             # dread.lift_x86's barrier, dread.volorder in readable C)
@@ -85,12 +86,13 @@ class X86:
                                             # return address the call pushed lies between
     veneer_reg = "eax"                      # no veneers (a 5-byte jmp reaches every address); eax is where
                                             # GCC and clang mostly load a pointer they call through
-    generator_version = 6           # 2: a case gives eax, edx and ecx to a function that takes them (case_regs);
+    generator_version = 7           # 2: a case gives eax, edx and ecx to a function that takes them (case_regs);
                                     # 3: one that only pushes edx or ecx as a call's argument takes them;
                                     # 4: a case answers the ports its runs read (ports); 5: padding reads
                                     # no register (is_padding: regflow's reads, case_regs); 6: a frame
                                     # aligned at run time has depths (lift_x86 realigns: the stack
-                                    # arguments of such a function and its stubs' words are known)
+                                    # arguments of such a function and its stubs' words are known);
+                                    # 7: rdtsc reads dread.emu's counter, not the host's clock
     refine_saved_writes = True              # dread.regflow refines a write of ebx, esi, edi or ebp too (taken as
                                             # all used): with three scratch registers, bytes pass through them
     SWITCH_MAX = 1024                       # table entries read at most
@@ -438,6 +440,24 @@ class X86:
         return targets
 
     # ---- what the case generator learns from the code (dread.autocase, dread.record) ----
+
+    def counter_sites(self, data, base):
+        """The addresses in data (loaded at base) where an rdtsc would start: every 0f 31. dread.emu hooks
+        each one (a code hook fires only where an instruction starts, and an instruction that starts with
+        0f 31 is rdtsc, so the bytes of 0f 31 inside other instructions or data cost a hook and nothing
+        else)."""
+        out, at = [], data.find(self.COUNTER_READ)
+        while at >= 0:
+            out.append(base + at)
+            at = data.find(self.COUNTER_READ, at + 1)
+        return out
+
+    def answer_counter(self, uc, address, value):
+        """rdtsc's result: the counter's 64 bits in edx and eax, and on behind the instruction (a code hook
+        that moves eip runs no rdtsc, whose answer is the host's clock in Unicorn)."""
+        uc.reg_write(UX.UC_X86_REG_EAX, value & 0xFFFFFFFF)
+        uc.reg_write(UX.UC_X86_REG_EDX, (value >> 32) & 0xFFFFFFFF)
+        uc.reg_write(UX.UC_X86_REG_EIP, address + len(self.COUNTER_READ))
 
     def prologue_frame(self, program, fn, look=16):
         """The stack a function's prologue reserves for locals: what sub esp, N lowers esp by before

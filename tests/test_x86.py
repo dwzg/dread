@@ -1344,6 +1344,67 @@ def test_a_frame_aligned_at_run_time(tmp_path):
     assert lift.check(target, image, ["realigned"], out=lines.append, jobs=2) == ["realigned"], lines
 
 
+TSC_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[8];
+
+static inline u32 tsc_low(void)
+{
+    u32 lo, hi;
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return lo;
+}
+
+__attribute__((noinline)) u32 spin(u32 ticks)
+{
+    u32 start = tsc_low(), n = 0;
+    while (tsc_low() - start < ticks)
+        n++;
+    return n;
+}
+
+void _start(void)
+{
+    sink[1] = spin(0x50000);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_the_time_stamp_counter_is_the_emulators(tmp_path):
+    """rdtsc: Unicorn answers with the host's clock, so spin, which counts the rounds until the counter
+    moved ticks on, ran as many rounds as the emulation's speed allowed (FreeRTOS's IA32 demo: the I2C
+    driver's waits, and a function reaching them that ran into the instruction limit in the runner, not
+    in the generator). The emulator answers COUNTER_START + n * COUNTER_STEP now: the same rounds with a
+    slow hook on every instruction and without, the reads counted, and spin's lift check passes (the
+    lifted C's rdtsc answered as the original's)."""
+    target = small_i386(tmp_path, TSC_C, "tsc")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from unicorn import UC_HOOK_CODE
+    from dread import emu, lift
+    from dread.autocase import Generator
+    image = target.image()
+    gen = Generator(target, image)
+    spin = gen.program.by_name["spin"]
+    ticks, rounds, reads = 0x50000, [], []
+    for slow in (False, True):
+        m = gen.machine()
+        m.plan = []
+        gen.apply(m, {"args": [ticks], "mem": [], "returns": [], "calls": [], "frame": 0})
+        if slow:
+            def on_code(uc, address, size, user):
+                for _ in range(300):
+                    pass
+            m.hook_add(UC_HOOK_CODE, on_code)
+        rounds.append(m.call(spin.entry, ticks, max_instructions=5_000_000).ret)
+        reads.append(m.counter_reads)
+    assert rounds == [(ticks - 1) // emu.COUNTER_STEP] * 2 and reads == [rounds[0] + 2] * 2, (rounds, reads)
+    lines = []
+    assert lift.check(target, image, ["spin"], out=lines.append, jobs=2) == ["spin"], lines
+
+
 PICK_C = r"""
 typedef unsigned int u32;
 volatile u32 sink[4];

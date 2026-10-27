@@ -39,7 +39,10 @@ UNMAPPED = (UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED, UC_ERR_FETCH_UNMAPPED)
 PAGE = 0x1000
 POLL_LOGGED = 2     # reads after a Machine.poll_read stage's start that are still logged one by one
 IO_LOGGED = 100_000 # device accesses of one run logged one by one; later ones folded (the docstring)
-IO_EVENTS = ("io read", "io write", "port read", "port write")    # (port: x86's in and out, Machine._on_port_in)
+IO_EVENTS = ("io read", "io write", "port read", "port write",   # (port: x86's in and out, Machine._on_port_in)
+             "counter read")                                          # (x86's rdtsc, Machine._on_counter)
+COUNTER_START = 0x100000000     # the time-stamp counter's first answer is this plus a step (Machine._on_counter)
+COUNTER_STEP = 0x10000          # what it advances by between two reads
 FOLD_CHUNK = 4096   # folded accesses hashed together (the digest is the same for the same accesses)
 POISON = 0xA5C3E100 # callee-saved registers start as POISON + 0x11 * (i + 1): no zero byte, so that
                     # a byte cleared in one of them shows
@@ -324,6 +327,11 @@ class Core:
         if ports:                           # (x86's in and out: a port space beside memory)
             uc.hook_add(UC_HOOK_INSN, self._on_port_in, None, 1, 0, ports[0])     # (unicorn 2.1: aux1)
             uc.hook_add(UC_HOOK_INSN, self._on_port_out, None, 1, 0, ports[1])
+        sites = getattr(layout.arch, "counter_sites", None)
+        if sites is not None:               # (x86's rdtsc: Unicorn hooks no rdtsc as an instruction)
+            for start, data in self.initial:
+                for site in sites(bytes(data), start):
+                    uc.hook_add(UC_HOOK_CODE, self._on_counter, begin=site, end=site)
         # Every Machine's own two hooks, added once (Unicorn's binding takes about 20 us to add a
         # hook): they hand over to the Machine that runs. The fault hook is a memory hook and clears
         # a stale IT state behind it, as Machine.hook_add does.
@@ -363,6 +371,9 @@ class Core:
 
     def _on_port_out(self, uc, port, size, value, user):
         self.machine._on_port_out(uc, port, size, value)
+
+    def _on_counter(self, uc, address, size, user):
+        self.machine._on_counter(uc, address)
 
     def page(self, number):
         """The initial contents of one page."""
@@ -488,6 +499,7 @@ class Machine:
         self.io_fixed = None        # {byte address: value}: peripheral reads return these, see _on_io
         self.ports = {}             # {port: value}: what x86's in reads there (a case's ports), see _on_port_in
         self.port_reads = set()     # the ports the run read with in (dread.autocase takes them for inputs)
+        self.counter_reads = 0      # the time-stamp counter's reads so far, see _on_counter
         self.polls = {}             # see poll_read()
         self.laters = {}            # see later_read()
         self.arg_domains = []       # [(register number, values)] applied by call()
@@ -628,6 +640,17 @@ class Machine:
     def _on_port_out(self, uc, port, size, value):
         """x86's out: logged in order as a device access (_on_io's io write)."""
         self.log("port write", port, size, value & ((1 << 8 * size) - 1))
+
+    def _on_counter(self, uc, address):
+        """x86's rdtsc: the n-th read of a run answers COUNTER_START + n * COUNTER_STEP, logged as a device
+        access. Unicorn answers with the host's clock, and a delay loop on it (FreeRTOS's IA32 demo: the
+        I2C driver waits 10000 ticks between polls) ran as many rounds as the host's speed allowed: the
+        same input ran a different number of instructions in the generator and in the runner. Both
+        images read the counter in the same order, so they get the same answers."""
+        self.counter_reads += 1
+        value = (COUNTER_START + COUNTER_STEP * self.counter_reads) & 0xFFFFFFFFFFFFFFFF
+        self.log("counter read", value)
+        self.layout.arch.answer_counter(uc, address, value)
 
     def poll_read(self, addr, n, value):
         """From the n-th read (1 is the first) of the register at addr on, until a later stage,
