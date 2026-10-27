@@ -6533,9 +6533,15 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         tells it by the two bytes cd NN in front of eip (software_interrupt, which dread.emu asks); and in
         the C inline assembly that hands eax, ecx and edx to the handler and back (it may change them, the
         emulator's no-op does not), the flags and memory clobbered (tests/test_x86.py: tick yields).
-      - [ ] cli and sti (7: interrupts masked around the critical sections), pushes of every register,
-        iret, in and out, rdtsc (the port's assembly and the support code: refused, rightly for now),
-        rep movsd and bt (2 each), the address of a stack argument taken (printf, sprintf: va_start).
+      - [x] cli and sti (7: interrupts masked around the critical sections) and bt reg (4: the event
+        groups' bt eax, 0x19) since 2026-10-27: cli and sti inline assembly that runs in the emulator as
+        in the original, bt the bit into cf (zf as it was; the other flags undefined, and compiled code
+        reads cf behind it), and rep movsd (2), which the lifter's string loop took all along: capstone
+        names it with its prefix (rep movsd), which the prefix check refused. tests/test_x86.py: crit,
+        flag and copy.
+      - [ ] Pushes of every register, iret, in and out, rdtsc (the port's assembly and the support code:
+        refused, rightly for now), the address of a stack argument taken (printf, sprintf: va_start; 7
+        on the trial build once regparm(3) and int N let their callers lift).
       - [ ] What remains of the failing cases once the above is done (52 cases with other memory, 15
         with another result and other stub calls in the first round), and the case generation errors
         (10).

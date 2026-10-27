@@ -75,6 +75,7 @@ CONDITIONS = {"o": "of", "no": "!of", "b": "cf", "ae": "!cf", "e": "zf", "ne": "
 JUMPS = {"j" + c: c for c in CONDITIONS}
 SETS = {"set" + c: c for c in CONDITIONS}
 MOVES = {"cmov" + c: c for c in CONDITIONS}
+STRING_OPS = ("movsb", "movsw", "movsd", "stosb", "stosw", "stosd")     # (_string: with rep, too)
 MUSTTAIL = "typedef unsigned (*f_)(unsigned);\nunsigned g_(f_ p, unsigned x) { __attribute__((musttail)) return p(x); }\n"
 NOPS = ("nop", "cld", "endbr32", "pause")   # cld: the direction flag is clear at every call (the ABI)
 ARITH = ("add", "adc", "sub", "sbb", "cmp", "and", "or", "xor", "test")
@@ -82,8 +83,8 @@ SHIFTS = ("shl", "sal", "shr", "sar", "rol", "ror")
 MASKS = {1: 0xFF, 2: 0xFFFF, 4: M32}
 UTYPES = {1: "u8", 2: "u16", 4: "u32"}
 STYPES = {1: "s8", 2: "s16", 4: "s32"}
-REFUSED = {"std": "sets the direction flag", "in": "reads a port", "out": "writes a port", "cli": "masks interrupts",
-           "sti": "allows interrupts", "lahf": "reads the flags register", "sahf": "writes the flags register",
+REFUSED = {"std": "sets the direction flag", "in": "reads a port", "out": "writes a port",
+           "lahf": "reads the flags register", "sahf": "writes the flags register",
            "pushfd": "pushes the flags register", "popfd": "pops into the flags register",
            "int3": "is a breakpoint", "ud2": "is an undefined instruction", "hlt": "halts", "iretd": "returns from an "
            "interrupt", "rdtsc": "reads the time-stamp counter", "cpuid": "asks the core what it is",
@@ -789,7 +790,9 @@ class X86Lifter(lift.Lifter):
         m, ops, a = insn.mnemonic, insn.operands, insn.address
         kind, target, falls = self.arch.flow(insn)
         depth = self.ctx["depth"]
-        if insn.prefix[0] and kind != "return" and m not in ("movsb", "movsd", "stosb", "stosd", "movsw", "stosw"):
+        if m.startswith("rep ") and m[4:] in STRING_OPS:      # (capstone names rep movsd so)
+            m = m[4:]
+        if insn.prefix[0] and kind != "return" and m not in STRING_OPS:
             raise Refused("0x%x: %s with a prefix (lock, rep) is not modelled" % (a, m))
         if m == "int":
             return self._int(insn)
@@ -885,8 +888,15 @@ class X86Lifter(lift.Lifter):
         if m == "bswap":
             name = self._reg(insn, ops[0].reg)
             return "%s = __builtin_bswap32(%s);" % (name, name)
-        if m in ("movsb", "movsw", "movsd", "stosb", "stosw", "stosd"):
+        if m in STRING_OPS:
             return self._string(insn, m)
+        if m in ("cli", "sti"):             # (FreeRTOS's critical sections: the C masks as the original does)
+            return '__asm__ volatile ("%s" ::: "memory");' % m
+        if m == "bt" and ops[0].type == X.X86_OP_REG and LANES.get(insn.reg_name(ops[0].reg), (0, 0))[1] == M32:
+            # the bit into cf; zf as it was, the others left undefined (and as they were in the C): the code
+            # reads cf behind it (FreeRTOS's event groups: bt eax, 0x19; jae)
+            bit = "%du" % (ops[1].imm & 31) if ops[1].type == X.X86_OP_IMM else "(%s & 31u)" % self._source(insn, ops[1])
+            return "cf = (%s >> %s) & 1u;" % (self._source(insn, ops[0]), bit)
         raise Refused("0x%x: %s is not modelled" % (a, m))
 
     def _mov(self, insn, ops):

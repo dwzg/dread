@@ -436,6 +436,61 @@ def test_int_n_is_a_system_call(tmp_path):
     assert readable.check(target, image, out=lines.append, jobs=2) == ["tick"], lines
 
 
+CLI_BT_C = r"""
+typedef unsigned int u32;
+volatile u32 counter;
+
+void crit(void)
+{
+    __asm__ volatile ("cli" ::: "memory");
+    counter++;
+    __asm__ volatile ("sti" ::: "memory");
+}
+
+void copy(u32 *d, const u32 *s, u32 n)
+{
+    __asm__ volatile ("rep movsl" : "+D"(d), "+S"(s), "+c"(n) :: "memory");
+}
+
+u32 flag(u32 x)
+{
+    u32 r;
+    __asm__ ("bt $25, %1; sbb %0, %0" : "=r"(r) : "r"(x) : "cc");
+    return (r & 7u) + 1u;
+}
+
+void _start(void)
+{
+    crit();
+    counter = flag(counter);
+    copy((u32 *)&counter, (const u32 *)&counter, 1);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_cli_sti_and_bt_lift(tmp_path):
+    """cli and sti (FreeRTOS's critical sections) are inline assembly in the C, run in the emulator as
+    in the original; bt reg, imm puts the bit into cf (FreeRTOS's event groups: bt eax, 0x19), which
+    sbb reads here; rep movsd (capstone's mnemonic carries the prefix) is a loop. crit's, flag's and
+    copy's lift checks pass; all three were refused until then."""
+    target = small_i386(tmp_path, CLI_BT_C, "clibt")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import lift, regflow
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    assert '__asm__ volatile ("cli" ::: "memory");' in lifter.lift(program.by_name["crit"]).text
+    assert "cf = (" in lifter.lift(program.by_name["flag"]).text
+    assert "while (ecx) {" in lifter.lift(program.by_name["copy"]).text
+    lines = []
+    assert sorted(lift.check(target, image, ["copy", "crit", "flag"], out=lines.append, jobs=2)) == \
+        ["copy", "crit", "flag"], lines
+
+
 @pytest.mark.parametrize("which", ["i386", "i386clang"])
 def test_gizmo_i386_rewritten_functions_agree(which, tmp_path):
     """The rewritten C over the original, every argument on the stack: functions that do not fit move
