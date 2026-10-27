@@ -1365,6 +1365,20 @@ class X86Lifter(lift.Lifter):
                 raise Refused("0x%x reads a stack word that the call at 0x%x passed to %s, which may change it "
                               "(the C passed a copy)" % (back, insn.address, callee.name))
         regs = [] if variadic else list(self.reg_args(callee))
+        if regs == ["eax"] and not tail and callee.name not in self._tail_callees() and \
+                not self._takes_eax(callee) and "eax" not in self.leaves(callee) and \
+                self.flow and "eax" in self.flow.overwritten_regs(callee.name):
+            # a callee that reads no eax and overwrites it on every path (dread.regflow: its result is its
+            # own, never what its caller left there) gets no eax: its declaration says regparm(0)
+            # (render), and its stack arguments lie where they lay, whichever convention its own C has.
+            # Until 2026-10-27 every call passed eax (f(eax, x)), an argument of nothing in readable C.
+            # Not reading it is not enough: FreeRTOS's vTaskSuspend reads no eax but hands back the one
+            # it was given (push eax ... pop eax), and the comparison reads it at its caller's return
+            # (a first try without overwritten lost three functions on the IA32 -O2 build). A tail call
+            # keeps it too (musttail wants the caller's convention), and so does every call of a callee
+            # the function also tail-calls: the file declares each callee once (prvUnlockQueue calls
+            # vPortExitCritical and jumps to it, and its C did not compile with two conventions).
+            regs = []
         self.ctx["callees"].add((callee.name, -1 if variadic else nstack, width, len(regs)))
         call = "%s(%s)" % (callee.name, ", ".join(regs + words))
         keep = set(self.flow.preserved_regs(callee.name)) if self.flow else set()
@@ -1379,6 +1393,25 @@ class X86Lifter(lift.Lifter):
         if width == 2:
             return "{ u64 x_ = %s; eax = (u32)x_; edx = (u32)(x_ >> 32); } %s" % (call, clear)
         return "eax = %s; %s" % (call, clear)
+
+    def _tail_callees(self):
+        """The names of the functions the function being lifted jumps to (tail calls), made once."""
+        got = self.ctx.get("tail_callees")
+        if got is None:
+            fn, prog = self.ctx["fn"], self.prog
+            own = set(fn.insns)
+            got = set()
+            for a in fn.insns:
+                insn = prog.insn(a)
+                if insn is None:
+                    continue
+                kind, target, _ = self.arch.flow(insn)
+                if kind == "jump" and isinstance(target, int) and target not in own:
+                    callee = prog.by_entry.get(prog.code_address(target))
+                    if callee is not None:
+                        got.add(callee.name)
+            self.ctx["tail_callees"] = got
+        return got
 
     def writes_stack_args(self, fn):
         """Whether fn may write one of its stack arguments, as far as its frame shows: a store into a word

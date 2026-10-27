@@ -6760,8 +6760,20 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         vTaskSuspend's prologue makes room with push eax and its epilogue takes it off with pop eax, so
         on a path that writes no other eax it returns the eax it was given, through its frame; dread.regflow
         says it reads no eax (read_regs empty), and the cases compare a void function's leftover eax (the
-        callers' return value: 0x1a7e4016 against 0x201400). First dread.regflow has to see such a round
-        trip (a register pushed and popped back unchanged is handed back); then the change again.
+        callers' return value: 0x1a7e4016 against 0x201400). The second try the same evening keeps eax
+        unless dread.regflow says the callee overwrites it on every path (overwritten: its must-write
+        analysis already counts a pop as a put-back, so vTaskSuspend's eax is not overwritten), and for
+        every call of a callee the function also tail-calls (one declaration a callee: prvUnlockQueue
+        calls vPortExitCritical and jumps to it, and its C did not compile with two conventions). On
+        copies of the three bench builds from the same case cache, against the same code without it:
+        the same functions accepted (257, 231, 236), readable 256 against 255 (GCC -Os), 229 against 226
+        (-O2) and 236 against 235 (clang), none lost; newly readable vHPETIRQHandler1 (both GCC builds,
+        the leftover-eax item below), vHPETIRQHandler0, xEventGroupWaitBits (-O2) and
+        prvQueueSetReceivingTask (clang). A model of the round trip itself in dread.regflow (a push and
+        its pops as a copy through the frame, may-write by paths; branch regflow-pushpop) changed no fact
+        on nine bench builds, ARM and RISC-V included: compiled code pushes and pops back eax in void
+        functions, whose result no caller reads; not kept. tests/test_x86.py: a_callee_called_and_jumped_to
+        (fails without the tail-callee rule).
       - [x] A register a function hands back unchanged through a call (2026-10-27): EnableI2CController
         never writes ecx and calls GetI2CIoPortBaseAddress, which leaves it alone; its callers keep a
         value in ecx across it (GCC's -fipa-ra). At its call ecx held what its own caller left, and the
@@ -6847,7 +6859,8 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         on a copy of the -O2 build. tests/test_x86.py: by cl and by an immediate, into a register and into
         memory, and the carry and overflow flags read behind them (counts 0, 1 and up).
       - [ ] vHPETIRQHandler1's readable C (the GCC -Os bench build's one lifted function the readable gate
-        drops, 2026-10-27: return value 0 against 0x40). Its callee vApplicationHPETTimer1Handler is void in
+        drops, 2026-10-27: return value 0 against 0x40; readable on both GCC builds since the callers'
+        phantom eax went, the same evening, which was not traced further: the question below stays). Its callee vApplicationHPETTimer1Handler is void in
         readable C, rightly by the source, and leaves eax as it was, where the original loads a global into
         it (if (g == 0) return;). The callee's own cases enter with eax 0, as x86's cases set eax, edx and
         ecx only where a function reads them, and the global was 0 too: the gate took the void C. In the

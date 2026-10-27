@@ -334,7 +334,8 @@ def test_a_call_of_a_variadic_function_passes_what_the_call_site_stored(tmp_path
     lifter = lift.make_lifter(program, regflow.load(target, image, program))
     text = lifter.lift(program.by_name["caller"]).text
     calls = [line for line in text.split("\n") if "= total(" in line]
-    assert all(line.split("= total(")[1].startswith("eax, ") and line.count("volatile u32") == 1
+    # (one word each, and no eax: total reads none, so since 2026-10-27 the call passes none either)
+    assert all(line.split("= total(")[1].startswith("*(volatile u32 *)") and line.count("volatile u32") == 1
                for line in calls), calls
 
 
@@ -1755,7 +1756,10 @@ def test_gizmo_i386_lifts():
     program = Program(target)
     lifter = lift.make_lifter(program, regflow.load(target, target.image(), program))
     assert lifter.call_saved(program.by_name["uart_putc"]) == ["edx"]
-    call = [line for line in lifted["uart_puts"].text.splitlines() if "uart_putc(eax" in line][0]
+    # (uart_putc reads no eax: the call passes none, its declaration says regparm(0))
+    call = [line for line in lifted["uart_puts"].text.splitlines() if "= uart_putc(" in line][0]
+    assert "uart_putc(eax" not in call
+    assert "extern u32 uart_putc(u32) __attribute__((regparm(0)));" in lifted["uart_puts"].text
     assert "ecx = 0; cf = zf = sf = of = 0;" in call and "edx = 0" not in call
     text = lifted["clamp"].text
     assert "u32 clamp(u32 eax_in, u32 sa0, u32 sa1, u32 sa2)" in text
@@ -1901,10 +1905,13 @@ def test_the_x86_c_takes_eax_in_eax(tmp_path):
 
 
 def test_gizmo_i386_readable_c_passes_its_gate(tmp_path):
-    """dread readable on gizmo-i386: the types pass writes read_line's head anew where the cases take it
-    (its eax a signed value: uart_getc returns -1 for nothing; GCC 13 kept u32), eax still first. The C takes eax in eax because dread.build compiles
-    it with -mregparm=1 (its REGPARM line); an attribute in the head's text was lost there, and every
-    argument was read a word off. The readable C of these functions passes the cases their lifted C passed."""
+    """dread readable on gizmo-i386: the C of these functions passes the cases their lifted C passed. Its
+    file is compiled with -mregparm=1 (dread.build's REGPARM line, for the eax the lifter hands on);
+    an attribute in the head's text was lost there once, and every argument was read a word off.
+    read_line's head says regparm(0) and has no eax: the eax it was given went on only to its callees,
+    which read none (uart_getc), so since 2026-10-27 its calls pass none and nothing reads it
+    (dread.readable cdecl). The buffer, a stack parameter read whole, is a pointer (dread.tidy
+    stack_params)."""
     if not _compiles("i386", tmp_path):
         pytest.skip("needs the host's gcc with -m32")
     from dread import lift, readable
@@ -1918,11 +1925,9 @@ def test_gizmo_i386_readable_c_passes_its_gate(tmp_path):
     out = tmp_path / "readable"
     assert readable.main(["--target", str(tmp_path / "gizmo" / "i386"), "--out", str(out), "read_line"]) == 0
     import re
-    head = re.search(r"^\w+ read_line\((\w+) (\w+), (.*)sa0, u32 sa1\)$", (out / "read_line.c").read_text(), re.M)
-    # (the types pass gives eax another type where the cases take it: s32 with GCC 15, u32 kept with 13;
-    # the buffer, a stack parameter read whole, is the parameter and a pointer: dread.tidy stack_params)
-    assert head and head.group(1) in ("s32", "u32") and head.group(2).startswith("eax"), head
-    assert head.group(3).rstrip().endswith("*"), head.group(0)
+    head = re.search(r"^__attribute__\(\(regparm\(0\)\)\) \w+ read_line\((.*)sa0, u32 sa1\)$",
+                     (out / "read_line.c").read_text(), re.M)
+    assert head and head.group(1).rstrip().endswith("*"), (out / "read_line.c").read_text()
 
 
 # ---- the system run (dread.sysrun) ----
@@ -2307,3 +2312,47 @@ def test_lidt_is_the_instruction_itself(tmp_path):
     assert lift.check(target, image, ["setup_idt"], out=lines.append, jobs=2) == ["setup_idt"], lines
     text = (tmp_path / "lidt" / "build" / "lift-check" / image.name / "lifted" / "setup_idt.c").read_text()
     assert '__asm__ volatile ("lidt (%0)" : : "r"(a_) : "memory");' in text, text
+
+
+TAILBOTH_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+
+__attribute__((noinline)) u32 tick(u32 x)
+{
+    sink[0] = x;
+    return x + 1;
+}
+
+__attribute__((noinline)) u32 both(u32 x)
+{
+    if (x & 1)
+        return tick(x);
+    sink[1] = tick(x + 2);
+    return 0;
+}
+
+void _start(void)
+{
+    sink[2] = both(3) + both(4);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_callee_called_and_jumped_to_keeps_one_convention(tmp_path):
+    """both jumps to tick on one path (a tail call, which keeps eax: musttail wants the caller's
+    convention) and calls it on the other; tick overwrites eax and reads none, so a call of it alone would
+    pass no eax. The file declares tick once, so both calls keep eax: until 2026-10-27's fix the call
+    passed none and the declaration said regparm(1), and FreeRTOS's prvUnlockQueue on the IA32 -O2 build
+    (vPortExitCritical) did not compile."""
+    from dread import lift
+    target = small_i386(tmp_path, TAILBOTH_C, name="tailboth")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    image = target.image()
+    lines = []
+    assert lift.check(target, image, ["both"], out=lines.append, jobs=2) == ["both"], lines
+    text = (tmp_path / "tailboth" / "build" / "lift-check" / image.name / "lifted" / "both.c").read_text()
+    assert "extern u32 tick(u32, u32);" in text and "tick(eax, " in text, text
