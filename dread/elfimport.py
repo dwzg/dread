@@ -447,12 +447,17 @@ def data_labels(target, image, elf, candidates):
     """[(start, end)] of the untyped labels among candidates (untyped_entries) that name data in an
     executable section rather than a function: nothing points at one (no call or jump of other code
     goes there, no other instruction holds its address as an immediate, no word the sections load
-    equals it outside its own bytes) and its bytes do not hold together as code (an instruction that
-    does not decode, so that its instructions do not fill it, or a call or jump out of the image).
-    FreeRTOS's IA32 start-up puts the multiboot
-    header between a jump and _start under a global label without a type (_mboot_hdr); as a function
-    it read as code calling 0x24101205. A label nothing points at that reads as code stays (dead
-    code, or code entered from elsewhere)."""
+    equals it outside its own bytes), no code that is kept runs on into it (_start into _restart;
+    padding behind a jmp runs on into nothing: its entry does not reach it),
+    and its bytes do not end as code does: an instruction that does not decode (so that its
+    instructions do not fill it), a call or jump out of the image, or a run on into the next label
+    without a return or jump at its end through an instruction the layer finds unlikely there
+    (unlikely_unreferenced: x86's port I/O and interrupt masking; libgcc's MSP430 shift routines run
+    into each other through entries nothing calls, and stay functions). FreeRTOS's IA32 start-up puts the multiboot header between
+    a jump and _start under a global label without a type (_mboot_hdr): as a function it read as code
+    calling 0x24101205 with the host's GCC, and with Debian's for i686 (other addresses in it) as
+    code that ran on into _start. A label nothing points at whose code ends (a ret) stays: dead code,
+    or code entered from elsewhere."""
     from dread.program import Program
     if not candidates:
         return []
@@ -487,7 +492,45 @@ def data_labels(target, image, elf, candidates):
             v = int.from_bytes(body[i:i + 4], "little")
             if v in fns and not v <= s.addr + i < v + max(fns[v].size, 1):
                 pointed.add(v)
-    return sorted((e, e + fns[e].size) for e in fns if e not in pointed and e in broken)
+
+    def runs_on(a):
+        insn = program.insn(a)
+        if insn is None:                    # (bytes that do not decode run on into nothing: MSP430's data)
+            return False
+        kind, _, falls = program.arch.flow(insn)
+        return kind in ("next", "call", "icall") or (kind == "jump" and falls)
+
+    def reached(fn):
+        """The instructions of fn its entry reaches (padding behind a jmp is none)."""
+        have, seen, work = set(fn.insns), set(), [fn.entry]
+        while work:
+            a = work.pop()
+            if a in seen or a not in have or program.insn(a) is None:
+                continue
+            seen.add(a)
+            kind, dest, falls = program.arch.flow(program.insn(a))
+            if kind == "jump" and isinstance(dest, int):
+                work.append(program.code_address(dest))
+            if runs_on(a):
+                work.append(a + program.insn_size(a))
+        return seen
+    ends = {}                               # address an instruction runs on to -> the function it ends
+    for fn in program.functions:
+        if fn.insns:
+            last = max(fn.insns)
+            if runs_on(last) and last in reached(fn):
+                ends[last + program.insn_size(last)] = fn.entry
+    odd = getattr(program.arch, "unlikely_unreferenced", None)
+    dangling = {e for e, fn in fns.items() if fn.insns and e not in broken and runs_on(max(fn.insns))
+                and odd is not None and any(program.insn(a) is not None and odd(program.insn(a)) for a in fn.insns)}
+    data = set()
+    while True:                             # (code falls into a label only from code that is kept)
+        fallen = {t for t, e in ends.items() if t in fns and e not in data}
+        now = {e for e in fns if e not in pointed and e not in fallen and (e in broken or e in dangling)}
+        if now == data:
+            break
+        data = now
+    return sorted((e, e + fns[e].size) for e in data)
 
 
 def called_without_function(target, image):
@@ -610,7 +653,7 @@ def main(argv=None):
                     for piece in ([(a, lo, k), (hi, b, k)] if a < hi and lo < b else [(a, b, k)])
                     if piece[0] < piece[1]]
         write_tables(image, functions, code, symbols)
-        print("%d labels without a type that nothing points at and that do not read as code, data: %s"
+        print("%d labels without a type that nothing points at or runs into and that do not end as code, data: %s"
               % (len(drops), ", ".join(names[lo] for lo, _ in drops)))
     called = called_without_function(target, image)
     if called:

@@ -131,11 +131,15 @@ hdr:
     .globl go
 go:
     call    helper
+    call    first
     pushl   $isr                # (isr: known by its address alone)
     call    install
     addl    $4, %esp
 1:  hlt
     jmp     1b
+    .globl pad                  # data that reads as code to its end (sti, nops) and runs on into helper
+pad:
+    .byte   0xfb, 0x90, 0x90, 0x90
     .globl helper
 helper:
     xorl    %eax, %eax
@@ -148,9 +152,15 @@ install:
     .globl isr
 isr:
     iret
-    .globl dead                 # (nothing points at it, and it reads as code)
+    .globl dead                 # (nothing points at it, and it reads as code that ends)
 dead:
     movl    $1, %eax
+    ret
+    .globl first
+first:
+    movl    $2, %eax            # (runs on into second, which nothing else reaches)
+    .globl second
+second:
     ret
 """
 
@@ -186,11 +196,13 @@ cflags = ["-m32", "-march=i686", "-fno-pic", "-fno-pie", "-Os", "-ffreestanding"
 
 def test_untyped_labels_padding_and_the_listing(tmp_path, capsys):
     """Assembly marks labels as functions without a type, and x86 has no mapping symbols: dread
-    import-elf makes data of one that nothing points at and that does not read as code (a header under
-    a global label: its first bytes call 0x40000000 + hdr), and keeps one known by its address alone
-    (pushl $isr) and one nothing points at that reads as code; the program database decodes again from
-    each function's entry (go follows the header); and dread asm writes the padding nop of several
-    bytes raw from the start (its precheck), so that the listing rebuilds in its first pass."""
+    import-elf makes data of a label that nothing points at and nothing runs into and that does not end
+    as code does (a header: its first bytes call 0x40000000 + hdr; pad: four bytes that read as sti
+    and nops and run on into helper; MSP430's libgcc shift routines run on into each other too, and are
+    code), and keeps one known by its address alone (pushl $isr), one nothing points
+    at whose code ends (dead) and one code runs on into (second); the program database decodes again
+    from each function's entry (go follows the header); and dread asm writes the padding nop of
+    several bytes raw from the start (its precheck), so that the listing rebuilds in its first pass."""
     if not _compiles("i386", tmp_path):
         pytest.skip("needs the host's gcc with -m32")
     from dread import elfimport, mkasm
@@ -205,10 +217,11 @@ def test_untyped_labels_padding_and_the_listing(tmp_path, capsys):
                     "-o", str(elf), str(source)], check=True)
     assert elfimport.main([str(elf), "--target", str(root), "--payload", str(root / "original" / "image.bin")]) == 0
     out = capsys.readouterr().out
-    assert "data: hdr" in out, out
+    assert "end as code, data: hdr, pad" in out, out
     target = Target.load(str(root))
     program = Program(target, target.image())
-    assert sorted(fn.name for fn in program.functions) == ["_start", "dead", "go", "helper", "install", "isr"]
+    assert sorted(fn.name for fn in program.functions) == ["_start", "dead", "first", "go", "helper", "install",
+                                                         "isr", "second"]
     go = program.by_name["go"]
     assert go.insns[0] == go.entry and program.insn(go.entry).mnemonic == "call"
     assert mkasm.main(["--target", str(root), "--verify"]) == 0

@@ -194,6 +194,16 @@ class X86:
     def is_call(self, insn):
         return self.flow(insn)[0] in ("call", "icall")
 
+    UNLIKELY = frozenset(("in", "out", "insb", "insw", "insd", "outsb", "outsw", "outsd", "cli", "sti", "hlt",
+                          "lgdt", "lidt", "lldt", "ltr", "arpl", "bound", "into", "das", "daa", "aas", "aaa",
+                          "aam", "aad", "salc"))
+
+    def unlikely_unreferenced(self, insn):
+        """Whether an instruction is unlikely in code that nothing calls and that runs on into the next
+        label (dread.elfimport.data_labels): port I/O, interrupt masking, hlt, the descriptor tables,
+        BCD adjustments; FreeRTOS's IA32 multiboot header, read as code, has sti and in al, 4."""
+        return insn.mnemonic in self.UNLIKELY
+
     def is_syscall(self, insn):
         return insn.mnemonic in ("int", "into", "syscall", "sysenter")
 
