@@ -6711,6 +6711,17 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         bit 31 of that ^ the result, Intel's for a count of 1). vMilliSecondDelay passes the lift check
         on a copy of the -O2 build. tests/test_x86.py: by cl and by an immediate, into a register and into
         memory, and the carry and overflow flags read behind them (counts 0, 1 and up).
+      - [ ] vHPETIRQHandler1's readable C (the GCC -Os bench build's one lifted function the readable gate
+        drops, 2026-10-27: return value 0 against 0x40). Its callee vApplicationHPETTimer1Handler is void in
+        readable C, rightly by the source, and leaves eax as it was, where the original loads a global into
+        it (if (g == 0) return;). The callee's own cases enter with eax 0, as x86's cases set eax, edx and
+        ecx only where a function reads them, and the global was 0 too: the gate took the void C. In the
+        whole image the caller's C has 0x40 in eax at the call, and the caller returns eax (its address
+        goes into the interrupt table, a call through a pointer counts as reading the result). ARM's cases
+        give every argument register a value, so a void C that leaves r0 differs there. Fix: x86's cases
+        give eax, edx and ecx a fixed value at the entry where the function reads none, in both images;
+        first check that lifted C hands such a register on where the original leaves it to the return
+        (regflow's reads: a lifted function that initialises it to 0 would differ).
       - [ ] WaitForStopDet's wait (-O2 build: 20 of its 54 instructions unrun): the status register lies
         behind the base address the driver reads from PCI configuration space, which the generator aims
         at a scratch buffer, plain memory, where no spin is cut and no poll stage answers; the wait's own
