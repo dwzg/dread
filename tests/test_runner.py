@@ -787,3 +787,32 @@ def test_the_labels_of_the_failing_cases():
              "FAIL clamp [case generation]: no inputs", "FAIL clamp                      2/9 cases agree"]
     assert runner.failed_labels("clamp", lines) == ["generated 3", "kept 0", "a case [of mine]"]
     assert runner.failed_labels("clamp_all", lines) == ["generated 1"] and runner.failed_labels("other", lines) == []
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_change_to_an_included_file_rebuilds(tmp_path):
+    """compile_all asks the compiler which files an object was made from (-MMD), so that a change to a
+    file its source includes from elsewhere makes it again: each gizmo build includes the shared
+    examples/gizmo/rewritten/rewritten.c, and until 2026-10-27 only the sources and the headers beside
+    them counted (an edit there left the old object linked, and dread test ran the old C)."""
+    import time
+    from dread.target import Target
+    from conftest import gizmo_dir
+    target = Target.load(gizmo_dir("m3"))
+    shared = tmp_path / "shared" / "part.c"
+    shared.parent.mkdir()
+    shared.write_text("int part(void) { return 1; }\n")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "main.c").write_text('#include "../shared/part.c"\n')
+    objdir = str(tmp_path / "obj")
+    obj, = build.compile_all(target, target.image(), str(src), objdir, quiet=True)
+    before = open(obj, "rb").read()
+    assert build.compile_all(target, target.image(), str(src), objdir, quiet=True) == [obj]
+    assert open(obj, "rb").read() == before and not build.depends_changed(obj)
+    shared.write_text("int part(void) { return 2; }\n")
+    later = time.time() + 5
+    os.utime(shared, (later, later))
+    assert build.depends_changed(obj)
+    build.compile_all(target, target.image(), str(src), objdir, quiet=True)
+    assert open(obj, "rb").read() != before

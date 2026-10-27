@@ -136,13 +136,42 @@ def compiler_error(output):
     return ""
 
 
+def depends_file(obj):
+    """Where the compiler lists the files an object was made from (-MMD -MF)."""
+    return os.path.splitext(obj)[0] + ".d"
+
+
+def depends_changed(obj):
+    """Whether a file the compiler listed for an object (depends_file: the source, every header and every
+    other file it included, from wherever) is newer than the object or gone; True where there is no
+    list (an object made before DREAD asked for one)."""
+    try:
+        with open(depends_file(obj)) as f:
+            text = f.read()
+    except OSError:
+        return True
+    rule = text.replace("\\\n", " ").split("\n", 1)[0]
+    _, _, files = rule.partition(": ")
+    made = os.path.getmtime(obj)
+    for path in files.split():
+        try:
+            if os.path.getmtime(path) > made:
+                return True
+        except OSError:
+            return True
+    return False
+
+
 def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=False, flags=()):
     """Compile the sources under `src` into `objdir`; returns the object paths. extra_include:
     further include directories (dread mutate compiles a copy elsewhere and still needs the
     headers beside the original); quiet: no compiler messages (variants that do not compile);
     flags: further flags after the target's (the lifted C's [compiler] lifted_cflags). A source that
     does not compile raises dread.overlay OverlayError with the sources that failed and, for each, the
-    first error the compiler named (compiler_error), quiet or not."""
+    first error the compiler named (compiler_error), quiet or not. An object is made again when the
+    flags changed, or the source, a header beside it, or any file the compiler listed for it when it
+    was made (depends_changed: a file it includes from elsewhere, as each gizmo build includes
+    examples/gizmo/rewritten/rewritten.c) is newer."""
     sources = sorted(f for suffix in SOURCES for f in glob.glob(os.path.join(src, "**", "*" + suffix), recursive=True))
     include = [INCLUDE, src] + list(extra_include) + target.compiler.include
     headers = [h for d in include for suffix in HEADERS
@@ -164,7 +193,8 @@ def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=F
         rel = os.path.relpath(c, src)
         obj = os.path.join(objdir, rel + ".o" if is_cxx(c) else rel[:-2] + ".o")
         objects.append(obj)
-        if not same or not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(c), newest_header):
+        if not same or not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(c), newest_header) \
+                or depends_changed(obj):
             todo.append((c, obj))
     procs = []
     for c, obj in todo:
@@ -172,7 +202,8 @@ def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=F
         if os.path.exists(obj):         # a failed compile must not leave the old object behind
             os.remove(obj)
         command = cxx[0] + cxx[1] if is_cxx(c) else target.compiler.command("cc") + flags
-        procs.append((c, subprocess.Popen(command + file_flags(target, c) + ["-c", "-o", obj, c],
+        procs.append((c, subprocess.Popen(command + file_flags(target, c) + ["-MMD", "-MF", depends_file(obj),
+                                                                              "-c", "-o", obj, c],
                                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)))
     failed, errors = [], {}
     for c, p in procs:
@@ -192,6 +223,8 @@ def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=F
     stale = set(glob.glob(os.path.join(objdir, "**", "*.o"), recursive=True)) - set(objects)
     for obj in stale:                   # a removed source must not stay linked
         os.remove(obj)
+        if os.path.exists(depends_file(obj)):
+            os.remove(depends_file(obj))
     return objects
 
 
