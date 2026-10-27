@@ -6474,7 +6474,14 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
       from 808 raw instructions after sixteen passes to 13 after two (a far jump capstone writes as GNU
       as does not read, eleven padding nops, a near jmp with a short distance: GNU as keeps a jump to a
       global symbol at 32 bits).
-    - [ ] A bench recipe (bench/freertos.toml, project ia32): the host's 32-bit libgcc does not do,
+    - [x] A bench recipe (bench/freertos.toml, project ia32; 2026-10-27): three builds, Debian 12's GCC
+      for i686 at -Os and -O2 and clang 16 (its assembly through GNU as: the demo's .S has .func and
+      suffix-less memory operands, which clang's own assembler takes neither of), the demo's
+      -march=pentium; DREAD compiles C with the host's gcc -m32 and clang (dread_cc). Each imports
+      (the multiboot header data: with Debian's GCC its bytes read as code that ran on into _start,
+      elfimport.data_labels now takes that for data too) and its listing rebuilds byte for byte
+      (GCC -Os 14 raw instructions after two passes, clang 18 after six, GCC -O2 431 after seven: the
+      padding nops between functions and in loops). What it needed, below. The host's 32-bit libgcc does not do,
       because CachyOS builds its packages for x86-64-v3 and its __udivdi3 uses lzcnt, shlx and shrx,
       which the Galileo's Quark (a Pentium) never runs: Debian's gcc-i686-linux-gnu in a toolchain
       image. The demo needs patches: the full demo (mainCREATE_SIMPLE_BLINKY_DEMO_ONLY 0), stats
@@ -6484,8 +6491,10 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
       once comments and spaces are left out), no -fdata-sections (the demo's linker script collects
       .bss alone, so its startup would clear nothing), and room for C that moves: its linker script
       puts .data right behind .text, and the first lift check dropped 138 of 293 functions for room.
-      The bench then needs a patch that takes a file as of another commit, and a build key for the
-      compiler DREAD compiles C with on the host (dread_compiler takes a cross prefix from cc).
+      The bench took a patch that takes a file as of another commit ({file, commit}: file_at), a build
+      key for the compiler DREAD compiles C with on the host (dread_cc), a patched linker script
+      (the link took the source's), a fetch that applies sparse paths added since, and a digest of a
+      build without the sparse paths (docs/decisions.md). Not measured yet (lift, readable): next.
     - [ ] The lift check with room (.data moved 256 KiB away): 102 of 293 accepted, 109 refused, 82
       dropped. What it showed, largest first:
       - [ ] GCC's local calling convention: a static function whose address is not taken gets its first

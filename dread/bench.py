@@ -75,8 +75,11 @@ Recipe format:
     includes = ["path", ...]
     defines = ["NAME=VALUE", ...]
     patches = [{file = "path/main.c", old = "...", new = "..."}]   # in a copy, never in the source
-                              # (a source, or a header: its directory is copied, see patched_sources)
-    ldscript = "path/x.ld"   # optional (a toolchain may pick the device's script itself: -mmcu)
+                              # (a source, or a header: its directory is copied, see patched_sources);
+                              # {file = "...", commit = "SHA"}: the file as of that commit of the
+                              # repository holding it (file_at)
+    ldscript = "path/x.ld"   # optional (a toolchain may pick the device's script itself: -mmcu;
+                              # a patch may change it: the link takes the patched copy)
     link = ["-nostartfiles", ...]                   # link options after the objects
     base = 0x0                # the image's load address; entry: a symbol name; limit: the end of the
     entry = "Reset_Handler"   # room behind the image (its flash), for C that moves
@@ -90,6 +93,7 @@ Recipe format:
     link = [...]              # optional: replaces the project's link options (another C library)
     dread_cflags = [...]      # optional: the flags rewritten C is compiled with (default: cflags
                               # without -g, -W, -M, -I and -D options)
+    dread_cc = "gcc"          # optional: the compiler DREAD compiles it with on the host (default: cc)
     [[builds.patches]]        # optional: substitutions of this build only, after the project's
 
 Toolchains: a build that names `toolchain = NAME` is compiled and linked in a podman container of the
@@ -248,6 +252,10 @@ def fetch(recipe, bench=None, out=print):
     if os.path.isdir(os.path.join(where, ".git")):
         head = run(["git", "rev-parse", "HEAD"], cwd=where).strip()
         if head == commit:
+            if src.get("sparse"):           # (a path the recipe added since: the IA32 demo)
+                have = run(["git", "sparse-checkout", "list"], cwd=where).split()
+                if sorted(have) != sorted(src["sparse"]):
+                    run(["git", "sparse-checkout", "set", "--no-cone"] + list(src["sparse"]), cwd=where)
             for sub in src.get("submodules", ()):
                 run(["git", "submodule", "update", "--init", "--filter=blob:none", sub], cwd=where)
             return where
@@ -290,6 +298,18 @@ def home(flags):
     return out
 
 
+def file_at(src, path, commit):
+    """The text of a source's file as of another commit of the git repository that holds it (a
+    submodule's own: FreeRTOS's kernel), which git fetches on demand in a partial clone."""
+    where = os.path.dirname(os.path.join(src, path))
+    try:
+        top = run(["git", "rev-parse", "--show-toplevel"], cwd=where).strip()
+        rel = os.path.relpath(os.path.join(src, path), top)
+        return run(["git", "show", "%s:%s" % (commit, rel)], cwd=top)
+    except Exception as e:
+        raise BenchError("patch of %s: no such file at commit %s (%s)" % (path, commit, e))
+
+
 def patched_sources(project, src, work, extra=()):
     """({source path: the file to compile}, [include directories to search first]): copies with the
     project's substitutions (and the build's, extra). A patched header's directory is copied whole
@@ -317,21 +337,27 @@ def patched_sources(project, src, work, extra=()):
         path = files.get(p["file"], copy)           # (a second substitution in one file builds on the first)
         if not os.path.isfile(path):
             raise BenchError("patch of %s, which is not in the project" % p["file"])
-        with open(path) as f:
-            text = f.read()
-        if text.count(p["old"]) != 1:
-            raise BenchError("patch of %s: the text to replace occurs %d times" % (p["file"], text.count(p["old"])))
+        if "commit" in p:                           # the file as of that commit (a fix taken from elsewhere)
+            text = file_at(src, p["file"], p["commit"])
+        else:
+            with open(path) as f:
+                text = f.read()
+            if text.count(p["old"]) != 1:
+                raise BenchError("patch of %s: the text to replace occurs %d times" % (p["file"], text.count(p["old"])))
+            text = text.replace(p["old"], p["new"])
         os.makedirs(os.path.dirname(copy), exist_ok=True)
         with open(copy, "w") as f:
-            f.write(text.replace(p["old"], p["new"]))
+            f.write(text)
         if p["file"] in files:
             files[p["file"]] = copy
     return files, [os.path.join(mirror, d) for d in mirrored]
 
 
 def dread_compiler(b):
-    """The target's [compiler] section for rewritten C, from the build's compiler and flags."""
-    cc = os.path.basename(b["cc"])
+    """The target's [compiler] section for rewritten C, from the build's compiler and flags (dread_cc:
+    the host's compiler where the build's runs in a container only: the i386 builds' i686-linux-gnu-gcc,
+    gcc -m32 on the host)."""
+    cc = os.path.basename(b.get("dread_cc", b["cc"]))
     flags = b.get("dread_cflags")
     if flags is None:
         flags = [f for f in b["cflags"] if not f.startswith(("-g", "-W", "-M", "-I", "-D"))]
@@ -352,9 +378,12 @@ def dread_compiler(b):
 def made_from(recipe, name):
     """A digest of what in the recipe makes a build (the pinned source, its project with the
     target's models and scenarios, the build's own entry): build.json keeps it, and measure() builds
-    again when it changed since."""
+    again when it changed since. The source's sparse paths are no part of it: they say which files are
+    checked out, not what a build is made of (a file a build needs and the checkout lacks fails the
+    build), and adding a project's directory made every build stale (2026-10-27, the IA32 demo)."""
     b = the_build(recipe, name)
-    made = {"source": recipe.get("source"), "project": recipe["projects"][b["project"]], "build": b}
+    source = {k: v for k, v in (recipe.get("source") or {}).items() if k != "sparse"}
+    made = {"source": source, "project": recipe["projects"][b["project"]], "build": b}
     if b.get("toolchain"):
         made["toolchain"] = toolchain_digest(b["toolchain"])
     blob = json.dumps(made, sort_keys=True, default=str)
@@ -402,7 +431,10 @@ def build(recipe, name, bench=None, jobs=None, out=print):
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs or os.cpu_count() or 4) as pool:
         objects = list(pool.map(compile_one, sorted(files.items())))
     elf = os.path.join(where, "firmware.elf")
-    script = ["-T", os.path.join(src, project["ldscript"])] if project.get("ldscript") else []
+    script = []
+    if project.get("ldscript"):                 # (a patched script: its copy, as a patched header's)
+        patched = os.path.join(work, "patched", project["ldscript"])
+        script = ["-T", patched if os.path.isfile(patched) else os.path.join(src, project["ldscript"])]
     link = b["link"] if "link" in b else project.get("link", ())      # (a build of another C library)
     run(tool([ld] + home(b.get("lflags", b["cflags"])) + script + ["-Wl,-Map=" + os.path.join(work, "firmware.map"),
                                                                    "-o", elf] + objects + home(link)),

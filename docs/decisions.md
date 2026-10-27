@@ -5459,3 +5459,21 @@ added where they help, the user, 2026-10-21).
   dread.build writes a REGPARM line ahead of each file of it (Lifter.regparm), which compile_all turns
   into -mregparm=1 for GCC and clang: every function of the file, its calls through pointers included,
   takes eax so.
+
+## A build's digest leaves the sparse paths out (2026-10-27)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** dread bench keeps a digest of what in the recipe made a build (made_from) and builds
+  again when it changed. The digest held the whole [source] table, its sparse paths included, so
+  adding FreeRTOS's IA32 demo to the checkout made every build of the recipe stale, although none of
+  them is made of those files. Keep the sparse paths in the digest, or leave them out?
+- **Options.** (a) Keep them, and give a new project a recipe of its own (a checkout and a report of
+  its own: the matrix in two halves). (b) Leave them out: the commit pins what every file holds, the
+  sparse paths only say which files are there, and a build that needs a file the checkout lacks fails
+  loudly instead of measuring something else.
+- **Choice.** (b). Changing the digest's form makes every build stale once, which the generator's
+  VERSION 36 (every generated case made anew) asked of them anyway; the next measurement builds each
+  again (seconds) before it measures. A fetch now also applies sparse paths a recipe added to a clone
+  already at its commit (it returned early before, and the IA32 demo never came into the checkout).
+

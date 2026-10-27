@@ -10,6 +10,7 @@ commit = "152cf36d6775bce6026a791845af12201aae703d"          # tag 202411.00
 sparse = [
     "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC", "FreeRTOS/Demo/Common", "FreeRTOS/Demo/RISC-V_RV32_QEMU_VIRT_GCC",
     "FreeRTOS/Demo/msp430_GCC", "FreeRTOS/Demo/MSP430X_MSP430F5438_CCS", "FreeRTOS/Demo/AVR_ATmega328PB_Xplained_mini_GCC",
+    "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2",
     "FreeRTOS/Source", "/*.md", "/*.txt",
 ]
 submodules = ["FreeRTOS/Source"]                              # the kernel, V11.1.0 at that commit
@@ -432,6 +433,97 @@ scratch = {base = 0x8000, size = 0x4000}
 file = "FreeRTOS/Demo/msp430_GCC/FreeRTOSConfig.h"
 old = "#include <msp430x44x.h>"
 new = "#include <msp430x44x.h>\n#define interrupt( vector )    __attribute__( ( interrupt( vector ) ) )\n#define wakeup                 __attribute__( ( wakeup ) )"
+
+# The full demo for IA32 (Intel's Galileo Gen 2, a Quark X1000) on the IA32_flat port, integer only:
+# the floating-point tasks (flop.c) and the port's FPU context left out (configSUPPORT_FPU 0; x87 code
+# is not a target yet). Patches: the full demo instead of blinky; stats formatting off (kernel V11 asks
+# for trace facility or run-time stats with it, and the demo has neither); SIZE_MAX (the demo's own
+# stdint.h has none); the port's ISR_Support.h as before a formatter broke its assembly in 2023 (% eax,
+# ".\n if": kernel commit 01820d3ed, the same code once comments and spaces are left out); and in the
+# linker script room for C that moves (.data at 0x180000, not right behind .text, which left none: the
+# first lift check dropped nearly half the functions for room) and no GNU property note in the image.
+# -ffunction-sections alone, as the demo builds: its linker script collects .bss without .bss.*.
+[projects.ia32]
+sources = [
+    "FreeRTOS/Source/tasks.c", "FreeRTOS/Source/list.c", "FreeRTOS/Source/queue.c",
+    "FreeRTOS/Source/timers.c", "FreeRTOS/Source/event_groups.c", "FreeRTOS/Source/stream_buffer.c",
+    "FreeRTOS/Source/croutine.c", "FreeRTOS/Source/portable/MemMang/heap_4.c",
+    "FreeRTOS/Source/portable/GCC/IA32_flat/port.c", "FreeRTOS/Source/portable/GCC/IA32_flat/portASM.S",
+    "FreeRTOS/Demo/Common/Minimal/BlockQ.c", "FreeRTOS/Demo/Common/Minimal/blocktim.c",
+    "FreeRTOS/Demo/Common/Minimal/countsem.c", "FreeRTOS/Demo/Common/Minimal/death.c",
+    "FreeRTOS/Demo/Common/Minimal/dynamic.c", "FreeRTOS/Demo/Common/Minimal/EventGroupsDemo.c",
+    "FreeRTOS/Demo/Common/Minimal/GenQTest.c", "FreeRTOS/Demo/Common/Minimal/IntQueue.c",
+    "FreeRTOS/Demo/Common/Minimal/QPeek.c", "FreeRTOS/Demo/Common/Minimal/QueueOverwrite.c",
+    "FreeRTOS/Demo/Common/Minimal/QueueSet.c", "FreeRTOS/Demo/Common/Minimal/recmutex.c",
+    "FreeRTOS/Demo/Common/Minimal/semtest.c", "FreeRTOS/Demo/Common/Minimal/TaskNotify.c",
+    "FreeRTOS/Demo/Common/Minimal/TimerDemo.c", "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2/main.c",
+    "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2/Blinky_Demo/main_blinky.c",
+    "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2/Full_Demo/main_full.c",
+    "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2/Full_Demo/IntQueueTimer.c",
+    "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2/Full_Demo/RegTest.S",
+    "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2/Support_Files/GPIO_I2C.c",
+    "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2/Support_Files/HPET.c",
+    "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2/Support_Files/freestanding_functions.c",
+    "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2/Support_Files/galileo-support.c",
+    "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2/Support_Files/printf-stdarg.c",
+    "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2/Support_Files/startup.S",
+]
+includes = ["FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2", "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2/Support_Files", "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2/Full_Demo", "FreeRTOS/Source/include",
+            "FreeRTOS/Source/portable/GCC/IA32_flat", "FreeRTOS/Demo/Common/include"]
+defines = ["SIZE_MAX=0xffffffffU"]
+ldscript = "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2/elf_ia32_efi.lds"
+link = ["-nostdlib", "-static", "-no-pie", "-Wl,--build-id=none", "-Wl,--gc-sections", "-lgcc"]
+base = 0x00100000
+limit = 0x00180000                      # the room for C that moves ends where the patched script puts .data
+entry = "_start"
+target = """
+[target]
+name = "freertos-ia32"
+title = "FreeRTOS full demo, i386 (Intel Galileo Gen 2)"
+
+[arch]
+name = "x86"
+isa = "i386"
+
+# The image loaded at 1 MiB (multiboot), its data at 0x180000; the Galileo's HPET, I/O APIC and local
+# APIC as memory-mapped devices (the UART's and the GPIO's registers lie where PCI configuration space,
+# read through port I/O, puts them). No device models yet.
+[memory]
+regions = [
+    {name = "image", base = 0x00100000, size = 0x80000, kind = "rom"},
+    {name = "ram", base = 0x00180000, size = 0x20000},
+    {name = "stack", base = 0x001c0000, size = 0x10000},
+    {name = "scratch", base = 0x00200000, size = 0x40000},
+]
+io = [[0xfec00000, 0xfec01000], [0xfed00000, 0xfed01000], [0xfee00000, 0xfee01000]]
+stack = {top = 0x001d0000, size = 0x4000}
+sentinel = 0x00f00000
+scratch = {base = 0x00200000, size = 0x40000}
+"""
+
+[[projects.ia32.patches]]
+file = "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2/main.c"
+old = "#define mainCREATE_SIMPLE_BLINKY_DEMO_ONLY    1"
+new = "#define mainCREATE_SIMPLE_BLINKY_DEMO_ONLY    0"
+
+[[projects.ia32.patches]]
+file = "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2/FreeRTOSConfig.h"
+old = "#define configSUPPORT_FPU\t\t\t\t\t\t1"
+new = "#define configSUPPORT_FPU\t\t\t\t\t\t0"
+
+[[projects.ia32.patches]]
+file = "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2/FreeRTOSConfig.h"
+old = "#define configUSE_STATS_FORMATTING_FUNCTIONS\t1"
+new = "#define configUSE_STATS_FORMATTING_FUNCTIONS\t0"
+
+[[projects.ia32.patches]]
+file = "FreeRTOS/Source/portable/GCC/IA32_flat/ISR_Support.h"
+commit = "01820d3ed"
+
+[[projects.ia32.patches]]
+file = "FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2/elf_ia32_efi.lds"
+old = "\t/* Read-write data (initialised) */\n"
+new = "\t. = 0x00180000;\n\t/DISCARD/ : { *(.note.gnu.property) }\n\t/* Read-write data (initialised) */\n"
 
 [[builds]]
 name = "mps2-gcc-Os"
@@ -867,3 +959,51 @@ cflags = ["-mmcu=msp430f449", "-I~/.local/opt/msp430-gcc-support-files/include",
           "-L~/.local/opt/msp430-gcc-support-files/include", "-Os", "-ffunction-sections", "-fdata-sections", "-g"]
 dread_cflags = ["-mcpu=msp430", "-mhwmult=16bit", "-Os", "-ffunction-sections"]
 dread_ldflags = []
+
+# The IA32 demo (project ia32) with Debian 12's GCC for i686, whose libgcc is built for a plain i686
+# (the host's 32-bit libgcc, from a distribution that builds for x86-64-v3, has lzcnt and shlx in
+# __udivdi3, which the Galileo's Quark never runs), and with clang 16 linked through it; the demo's
+# -march=pentium. DREAD compiles lifted and rewritten C with the host's compilers (dread_cc).
+[[builds]]
+name = "ia32-gcc12-Os"
+project = "ia32"
+toolchain = "debian-12"
+cc = "i686-linux-gnu-gcc"
+cflags = ["-march=pentium", "-mno-80387", "-mno-mmx", "-mno-sse", "-fno-pic", "-fno-pie", "-fcf-protection=none",
+          "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-ffreestanding", "-ffunction-sections",
+          "-mno-ms-bitfields", "-Wno-ignored-qualifiers", "-Os", "-g"]
+dread_cc = "gcc"
+dread_cflags = ["-m32", "-march=pentium", "-mno-80387", "-mno-mmx", "-mno-sse", "-fno-pic", "-fno-pie",
+                "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-ffreestanding", "-Os",
+                "-ffunction-sections"]
+
+[[builds]]
+name = "ia32-gcc12-O2"
+project = "ia32"
+toolchain = "debian-12"
+cc = "i686-linux-gnu-gcc"
+cflags = ["-march=pentium", "-mno-80387", "-mno-mmx", "-mno-sse", "-fno-pic", "-fno-pie", "-fcf-protection=none",
+          "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-ffreestanding", "-ffunction-sections",
+          "-mno-ms-bitfields", "-Wno-ignored-qualifiers", "-O2", "-g"]
+dread_cc = "gcc"
+dread_cflags = ["-m32", "-march=pentium", "-mno-80387", "-mno-mmx", "-mno-sse", "-fno-pic", "-fno-pie",
+                "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-ffreestanding", "-O2",
+                "-ffunction-sections"]
+
+[[builds]]
+name = "ia32-clang16-Os"
+project = "ia32"
+toolchain = "debian-12"
+cc = "clang"
+# -fno-integrated-as: the demo's assembly is GNU as's (.func, memory operands without a size suffix),
+# which clang's own assembler takes neither of; GNU as for i686 (-B: Debian's cross binutils) assembles
+# what clang generates
+cflags = ["--target=i686-unknown-elf", "-march=pentium", "-mno-x87", "-mno-mmx", "-mno-sse", "-fno-pic",
+          "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-ffreestanding", "-ffunction-sections",
+          "-fno-integrated-as", "-B/usr/i686-linux-gnu/bin/", "-Wno-ignored-qualifiers", "-Os", "-g"]
+ld = "i686-linux-gnu-gcc"               # libgcc from Debian's GCC for i686
+lflags = ["-march=pentium"]
+dread_cc = "clang"
+dread_cflags = ["--target=i686-unknown-elf", "-march=pentium", "-mno-x87", "-mno-mmx", "-mno-sse", "-fno-pic",
+                "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-ffreestanding", "-Os",
+                "-ffunction-sections"]

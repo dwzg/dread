@@ -291,6 +291,10 @@ def test_the_compiler_section_for_rewritten_c():
     assert gcc == '[compiler]\ncross = "arm-none-eabi-"\ncflags = ["-mthumb", "-Os"]\n'
     clang = bench.dread_compiler({"name": "b", "cc": "clang", "cflags": ["--target=thumbv7m-none-eabi", "-Os"]})
     assert clang == '[compiler]\nkind = "clang"\ntriple = "thumbv7m-none-eabi"\ncflags = ["-Os"]\n'
+    # a build compiled in a container only (Debian's i686-linux-gnu-gcc): DREAD's C with the host's gcc -m32
+    host = bench.dread_compiler({"name": "b", "cc": "i686-linux-gnu-gcc", "dread_cc": "gcc", "cflags": ["-Os"],
+                                 "dread_cflags": ["-m32", "-Os"]})
+    assert host == '[compiler]\ncross = ""\ncflags = ["-m32", "-Os"]\n'
 
 
 @needs_gcc
@@ -778,3 +782,69 @@ def test_figures_of_older_measurements_and_releases():
         assert bench.compiler_release(line) == release, line
     assert (bench.compiler_kind("clang"), bench.compiler_kind("/opt/x/riscv64-elf-gcc"), bench.compiler_kind("armcl")) == \
         ("clang", "gcc", "armcl")
+
+
+def test_a_file_as_of_another_commit(tmp_path):
+    """A patch {file, commit} takes the file as it was at that commit of the git repository that holds
+    it (FreeRTOS's IA32 port: its ISR_Support.h from before a formatter broke the assembly in it), into
+    the copy the build compiles; the checkout stays as it is."""
+    if not have("git"):
+        pytest.skip("needs git")
+    src = tmp_path / "src"
+    src.mkdir()
+
+    def git(*args):
+        return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=src, check=True,
+                              capture_output=True, text=True).stdout.strip()
+    git("init", "-q")
+    (src / "port.h").write_text("good\n")
+    (src / "main.c").write_text('#include "port.h"\n')
+    git("add", "port.h", "main.c")
+    git("commit", "-q", "-m", "one")
+    first = git("rev-parse", "HEAD")
+    (src / "port.h").write_text("broken\n")
+    git("commit", "-q", "-am", "two")
+    project = {"sources": ["main.c"], "patches": [{"file": "port.h", "commit": first[:9]}]}
+    files, first_dirs = bench.patched_sources(project, str(src), str(tmp_path / "work"))
+    assert open(os.path.join(first_dirs[0], "port.h")).read() == "good\n"
+    assert (src / "port.h").read_text() == "broken\n"
+    with pytest.raises(bench.BenchError, match="no such file"):
+        bench.patched_sources({"sources": ["main.c"], "patches": [{"file": "port.h", "commit": "0" * 12}]},
+                              str(src), str(tmp_path / "work"))
+
+
+def test_a_build_digest_leaves_the_sparse_paths_out(tmp_path):
+    """The sparse paths say which files of the pinned source are checked out, not what a build is made
+    of: adding one (FreeRTOS's IA32 demo) leaves every build current; another commit does not."""
+    def load(sparse, commit="a" * 40):
+        path = tmp_path / ("r%d.toml" % len(sparse))
+        path.write_text('''name = "r"
+[source]
+git = "https://example.org/r.git"
+commit = "%s"
+sparse = [%s]
+[projects.p]
+sources = ["a.c"]
+[[builds]]
+name = "b"
+project = "p"
+cc = "gcc"
+cflags = ["-Os"]
+''' % (commit, ", ".join('"%s"' % s for s in sparse)))
+        return bench.load(str(path))
+    assert bench.made_from(load(["a"]), "b") == bench.made_from(load(["a", "demo"]), "b")
+    assert bench.made_from(load(["a"]), "b") != bench.made_from(load(["a"], "b" * 40), "b")
+
+
+@needs_gcc
+def test_a_patched_linker_script_links(tmp_path, monkeypatch):
+    """The link takes a patched linker script's copy, not the source's (the IA32 demo's moves .data
+    away to leave room for C that moves)."""
+    monkeypatch.setenv("DREAD_BENCH", str(tmp_path / "bench"))
+    patch = '[[projects.m3.patches]]\nfile = "m3.ld"\nold = "ENTRY(Reset_Handler)"\n' \
+            'new = "ENTRY(Reset_Handler)\\ndread_patched_script = 0x12345678;"\n'
+    where = bench.build(recipe(tmp_path, patch), "m3-Os", out=lambda *a: None)
+    from dread.elf import Elf
+    assert any(s.name == "dread_patched_script" and s.value == 0x12345678
+               for s in Elf(os.path.join(where, "firmware.elf")).symbols)
+

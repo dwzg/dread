@@ -26,6 +26,11 @@ toolchains (4.9 to 8, 2015 to 2019) that vendor SDKs shipped and much firmware i
 with. Debian 9 and 10 are read from archive.debian.org (their releases are archived), Debian 11 and
 the Ubuntu images fall back to the archive mirrors when the regular ones no longer serve them.
 
+debian-12 also has Debian's GCC for i686 (12.2, binutils 2.40) with the i386 C library's headers
+(libc6-dev-i386-cross: GCC's limits.h includes the C library's, freestanding or not): the IA32 builds,
+whose libgcc is built for a plain i686. The host's 32-bit libgcc does not do there: a distribution
+built for x86-64-v3 (CachyOS) has lzcnt and shlx in its __udivdi3, which a Pentium-class core never runs.
+
 The distributions package newlib for ARM only, so the RISC-V builds link picolibc
 (`--specs=picolibc.specs`). Two flags differ by version: GCC 10 knows no `_zicsr` in `-march` (its
 ISA spec has the CSR instructions in the base), and GCC 12 knows it but then finds no multilib for
