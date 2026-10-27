@@ -2212,3 +2212,59 @@ def test_a_segment_register_is_read_as_the_original_reads_it(tmp_path):
     writes = [entry[4] for entry in a.log if entry[0] == "write"]
     assert writes == [0x00085678, 0x12348e00, 9], [hex(w) for w in writes]
     assert a.log == b.log and sysrun.compare(a, b) == [], (a.log, b.log)
+
+
+ARGPUSH_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+
+__attribute__((noinline, noipa)) u32 inner(u32 *p)
+{
+    sink[2] = p[0];
+    return p[0] + 1;
+}
+
+__attribute__((noinline)) u32 outer(u32 *p, u32 n)
+{
+    u32 *q = p + n;
+    u32 a = inner(q);
+    u32 b = inner(q);
+    return a + b;
+}
+
+void _start(void)
+{
+    sink[1] = outer((u32 *)sink, 1);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_an_argument_passed_from_a_saved_register_is_no_save(tmp_path):
+    """outer keeps q in ebx across its calls (inner's register use hidden: noipa), saves ebx with a push,
+    and passes q to inner from ebx, with a push the first time and a store through esp the second.
+    inner reading its argument reads no saved register: dread.fragile saves_touched takes the words a
+    direct call passes (its callee's stack_args) for arguments, whatever stored them. Until 2026-10-27
+    it found "read of the saved ebx by inner" (FreeRTOS's vTaskSuspend passes uxListRemove its argument
+    from esi so), and a case whose images differed was refused instead of compared."""
+    from dread import fragile
+    from dread.autocase import Generator
+    target = small_i386(tmp_path, ARGPUSH_C, name="argpush")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    image = target.image()
+    gen = Generator(target, image)
+    outer = gen.program.by_name["outer"]
+    texts = [gen.program.insn(a).mnemonic + " " + gen.program.insn(a).op_str for a in outer.insns]
+    assert texts.count("push ebx") == 2, texts         # (the save, and the argument of the first call)
+    scratch = target.memory.scratch_base
+
+    def setup(m):
+        m.write(scratch, (5).to_bytes(4, "little") + (7).to_bytes(4, "little"))
+    m = gen.machine()
+    setup(m)
+    first = m.call(outer.entry, scratch, 1, max_instructions=10_000)
+    assert first.ret == 16                         # (7 + 1, twice)
+    assert fragile.saves_touched(gen.machine, gen.program, gen.layout, setup, outer.entry, [scratch, 1],
+                                 10_000) is None

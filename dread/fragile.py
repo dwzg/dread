@@ -211,6 +211,25 @@ def stack_moved(make, layout, setup, addr, args, limit, first, name=None, kept=(
     return (keys, log_from) if keys or log_from is not None else None
 
 
+def stack_words(program, target):
+    """How many stack words a direct call of target passes (dread.lift's stack_args of its callee: 0
+    for none known), kept on the program per callee, with one lifter for all of them."""
+    cache = program.__dict__.setdefault("_fragile_stack_words", {})
+    if target not in cache:
+        callee = program.by_entry.get(program.code_address(target))
+        n = 0
+        if callee is not None:
+            from dread import lift
+            if None not in cache:
+                cache[None] = lift.make_lifter(program, None)
+            try:
+                n = cache[None].stack_args(callee) or 0
+            except Exception:
+                n = 0
+        cache[target] = n
+    return cache[target]
+
+
 def saves_touched(make, program, layout, setup, addr, args, limit, name=None, kept=(), why=None, timeline=None):
     """Where the original's run touches a saved register's slot (a callee-saved register or the
     return address that a push or a store through sp put into a frame still on the stack, of the
@@ -222,8 +241,12 @@ def saves_touched(make, program, layout, setup, addr, args, limit, name=None, ke
     out its frames otherwise and cannot be held to it. Returns "write of the saved REG at 0xADDR by
     FUNCTION" or "read ...", or None. Pops of any function count as pops (an MSP430 epilogue is a
     function of its own); the scratch registers GCC pushes only to make room (push {r0, r1, r4, lr},
-    push {r3, lr}) are no saves. It watches every instruction: dread test runs it only for a case
-    whose images differ. timeline (a Timeline): attached to the run and marked at the first touch, so
+    push {r3, lr}) are no saves, nor is a word a direct call takes as a stack argument (its callee's
+    stack_args, from sp at the call: x86's cdecl pushes or stores them from any register, push ebx;
+    call inner, and the callee reading its argument read "the saved ebx"; FreeRTOS's vTaskSuspend
+    passes uxListRemove its argument from esi so. Until 2026-10-27 such cases were refused, not
+    compared, where their images differed). It watches every instruction: dread test runs it only
+    for a case whose images differ. timeline (a Timeline): attached to the run and marked at the first touch, so
     that the runner can tell the differences before it, which the touch does not explain, from those
     after it."""
     from unicorn import UC_HOOK_CODE, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, UC_MEM_WRITE
@@ -259,6 +282,11 @@ def saves_touched(make, program, layout, setup, addr, args, limit, name=None, ke
         insn = prog.insn(prog.code_address(address))
         if insn is None:
             return
+        if saved:
+            kind, target, _ = arch.flow(insn)
+            if kind == "call" and isinstance(target, int):
+                for a in range(sp, sp + lay.word * stack_words(prog, target)):
+                    saved.pop(a, None)      # (the callee's stack arguments, whatever stored them)
         regs = arch.pushed_registers(insn)
         if regs:
             base = sp - arch.stack_bytes(insn)

@@ -6625,13 +6625,21 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         VERSION 32). tests/test_x86.py: kbd polls a status port and reads the data port.
       - [ ] Pushes of every register, iret (the port's assembly and the support code: refused, rightly for
         now).
-      - [ ] dread.fragile saves_touched takes an argument pushed from a callee-saved register for a saved
-        register (found 2026-10-27): vTaskSuspend passes uxListRemove its argument with push esi, and
-        uxListRemove reading it (mov eax, [esp + 8]) is "a read of the saved esi; a length past a local".
-        Every call that pushes ebx, esi, edi or ebp as an argument does so on x86 (ARM passes them in
-        registers), and a case refused for it is not compared: the leftover eax of the phantom-argument
-        attempt above showed as REFUSED, not as FAIL. A push that a call consumes (behind it, up to the
-        callee's stack arguments) is an argument, not a save.
+      - [x] dread.fragile saves_touched took an argument passed from a callee-saved register for a saved
+        register (found and corrected 2026-10-27): vTaskSuspend passes uxListRemove its argument with push
+        esi, and uxListRemove reading it (mov eax, [esp + 8]) was "a read of the saved esi; a length past
+        a local". Every call that passes ebx, esi, edi or ebp as a stack argument did so on x86, by a push
+        or a store through esp (ARM a fifth argument stored from r4 likewise), and a case refused for it
+        is not compared: the leftover eax of the phantom-argument attempt above showed as REFUSED, not as
+        FAIL. Now the words a direct call takes as stack arguments (its callee's stack_args, from sp at
+        the call) are no saves, whatever stored them; x86 generator 10, since the generator's choice of
+        the cases that stand for instructions follows the verdict. On copies of the three bench builds
+        (lift check, readable check) nothing was lost against the same code without it: a first
+        measurement from copies without the case cache lost three functions to coverage
+        (xTaskIncrementTick, vTaskPriorityDisinheritAfterTimeout twice), which pass from the same cache as
+        the baseline, since the generator carries an old case that reaches what the new ones do not.
+        tests/test_x86.py: argument_passed_from_a_saved_register (outer passes q from ebx, by a push and by
+        a store; fails with the old check).
       - [x] Reading a segment register (2026-10-27; "reads cs: not modelled", two to four functions in each
         bench build: pxPortInitialiseStack, vPortSetupIDT, xPortInstallInterruptHandler,
         xPortStartScheduler, prvSetInterruptGate, mov edx, cs or mov dx, cs for an IDT gate or a task's
