@@ -1305,3 +1305,16 @@ def test_random_it_blocks_cleaned_up_compute_the_same(tmp_path):
             args = [rng.choice([0, 1, 2, 0x7fffffff, 0x80000000, 0xffffffff, rng.getrandbits(32)]) for _ in range(4)]
             assert a(*args) == b(*args), (i, args, originals[i], results[i])
     assert ifs_after < ifs_before * 0.75, (ifs_before, ifs_after)
+
+
+def test_a_constant_sum_with_a_large_operand_folds():
+    """dread.tidy's _const_value computes only the operation asked for: 3 + 0xffffffffffffffff (the
+    lifter's 64-bit flag sums add a -1 so) is 2 modulo 2**64. Until 2026-10-27 it made all eight results
+    at once, and a << 0xffffffffffffffff for the sum raised OverflowError ("too many digits in
+    integer"), which ended a readable check. A shift by more than 63 is still no constant."""
+    tree = cparse.parse("u64 f(void) { return 3ull + 0xffffffffffffffffull; }")
+    fn = tree.function("f")
+    e = fn.body.body[0].e
+    assert tidy._const_value(e, lambda name: None) == 2
+    shift = cparse.parse("u32 g(void) { return 3u << 0xffffffffu; }").function("g").body.body[0].e
+    assert tidy._const_value(shift, lambda name: None) is None

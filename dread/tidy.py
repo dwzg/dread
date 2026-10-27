@@ -1490,13 +1490,20 @@ def _const_value(e, const):
     if isinstance(e, C.Unary) and e.op in ("~", "-"):
         v = _const_value(e.e, const)
         return None if v is None else (~v if e.op == "~" else -v) & mask
-    if isinstance(e, C.Binary) and e.op in ("+", "-", "*", "&", "|", "^", "<<", ">>"):
+    if isinstance(e, C.Binary) and e.op in _CONST_OPS:
         a, b = _const_value(e.l, const), _const_value(e.r, const)
         if a is None or b is None or (e.op in ("<<", ">>") and b > 63):
             return None
-        return {"+": a + b, "-": a - b, "*": a * b, "&": a & b, "|": a | b, "^": a ^ b,
-                "<<": a << b, ">>": a >> b}[e.op] & mask
+        # (only the operation asked for: until 2026-10-27 a dict of all eight was made for each, and an
+        # addition of 0xffffffffffffffff to a constant other than 0 computed a << 0xffffffffffffffff
+        # besides, which Python refuses with "too many digits in integer", ending the readable check)
+        return _CONST_OPS[e.op](a, b) & mask
     return None
+
+
+_CONST_OPS = {"+": lambda a, b: a + b, "-": lambda a, b: a - b, "*": lambda a, b: a * b,
+              "&": lambda a, b: a & b, "|": lambda a, b: a | b, "^": lambda a, b: a ^ b,
+              "<<": lambda a, b: a << b, ">>": lambda a, b: a >> b}
 
 
 def _frame_low(e, held, const=lambda name: None):
