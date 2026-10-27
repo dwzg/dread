@@ -1078,6 +1078,98 @@ def test_a_word_read_back_after_a_call(tmp_path):
     assert any(line.startswith("refused") and "back_w" in line and "passed to writer" in line for line in lines), lines
 
 
+PADDING_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+
+/* GCC -O2 for a core without nopl pads with lea of a register to itself: once behind a jmp, where no
+   path goes, and once where the code falls into a loop's head */
+__asm__(".text\n.globl padded\n.type padded, @function\npadded:\n"
+        "  movl 4(%esp), %ecx\n  xorl %eax, %eax\n  testl %ecx, %ecx\n  jne 2f\n  ret\n"
+        "  .byte 0x8d, 0xb4, 0x26, 0, 0, 0, 0\n"           /* lea esi, [esi + eiz*1 + 0]: no path */
+        "2:\n  .byte 0x8d, 0x76, 0x00\n"                   /* lea esi, [esi + 0]: falls into the loop */
+        "  .byte 0x8d, 0xbc, 0x27, 0, 0, 0, 0\n"           /* lea edi, [edi + eiz*1 + 0] */
+        "3:\n  addl %ecx, %eax\n  decl %ecx\n  jne 3b\n  ret\n.size padded, .-padded\n");
+u32 padded(u32 n);
+
+void _start(void)
+{
+    sink[1] = padded(4);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_padding_reads_nothing_and_is_no_code_to_free(tmp_path):
+    """padded holds an assembler's padding: lea esi, [esi] where no path goes (behind a ret) and lea esi,
+    [esi] and lea edi, [edi] where the code falls into a loop's head. They are no-ops (the layer's
+    is_padding): dread.regflow finds no read of esi or edi (each made the function take its caller's
+    register, and its callers refused), and the lift check takes the unreached one for padding ("code
+    no path from its entry reaches" refused it). The lift check passes; on FreeRTOS's IA32 demo built
+    with GCC -O2 for the Pentium they kept 111 functions out."""
+    target = small_i386(tmp_path, PADDING_C, "padding")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import lift, regflow
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    assert not {"esi", "edi"} & set(flow.read_regs("padded")), flow.read_regs("padded")
+    lines = []
+    assert lift.check(target, image, ["padded"], out=lines.append, jobs=2) == ["padded"], lines
+
+
+NULLREAD_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+
+__attribute__((noinline)) void note(u32 line)
+{
+    sink[0] = line;
+}
+
+/* the shape of an accessor behind an assertion as GCC -O2 makes it: where the pointer is null, the
+   assertion's handler returns and the read goes to address 0, which is memory here */
+__asm__(".text\n.globl getname\n.type getname, @function\ngetname:\n"
+        "  pushl %ebx\n  movl 8(%esp), %ebx\n  testl %ebx, %ebx\n  je 2f\n"
+        "  movl (%ebx), %eax\n  popl %ebx\n  ret\n"          /* each path its own load, as GCC -O2 makes */
+        "2:\n  pushl $691\n  call note\n  addl $4, %esp\n"
+        "  movl (%ebx), %eax\n  popl %ebx\n  ret\n.size getname, .-getname\n");
+u32 getname(u32 *p);
+
+void _start(void)
+{
+    sink[1] = getname((u32 *)sink);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_read_through_a_null_pointer_is_no_trap(tmp_path):
+    """getname reads through its argument where it is null too (behind an assertion whose handler
+    returns), and address 0 is memory on the target. GCC at -O2 kept such a load in the lifted C and
+    put ud2 behind it, the path being undefined to it (FreeRTOS's pcTimerGetName on the IA32 demo's -O2
+    build); every lifted file is compiled with -fno-delete-null-pointer-checks now (its NULL_CHECKS
+    line), and the case with a null pointer agrees."""
+    target = small_i386(tmp_path, NULLREAD_C, "nullread")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import lift
+    from dread.target import Target
+    toml = os.path.join(target.root, "dread.toml")
+    text = open(toml).read()
+    text = text.replace('regions = [\n', 'regions = [\n    {name = "low", base = 0x00000000, size = 0x1000},\n', 1)
+    text = text.replace('"-Os"', '"-O2"')
+    open(toml, "w").write(text)
+    target = Target.load(target.root)
+    image = target.image()
+    lines = []
+    assert lift.check(target, image, ["getname"], out=lines.append, jobs=2) == ["getname"], lines
+
+
 PICK_C = r"""
 typedef unsigned int u32;
 volatile u32 sink[4];

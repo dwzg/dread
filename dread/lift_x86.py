@@ -939,8 +939,8 @@ class X86Lifter(lift.Lifter):
             return self._port(insn)
         if m in REFUSED:
             raise Refused("0x%x %s" % (a, REFUSED[m]))
-        if m in NOPS:
-            return None
+        if m in NOPS or self.arch.is_padding(insn):
+            return None                     # (lea esi, [esi], mov esi, esi: an assembler's padding)
         made = self.made_value(insn, *self.ctx["states"][a])
         if made is not None and made[1] and made[1][0] == "sp" and made[1][1] <= 0:
             if made[1][1] <= -4 and m in ("lea", "mov") and self.ctx["stack_params"]:

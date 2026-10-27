@@ -85,9 +85,10 @@ class X86:
                                             # return address the call pushed lies between
     veneer_reg = "eax"                      # no veneers (a 5-byte jmp reaches every address); eax is where
                                             # GCC and clang mostly load a pointer they call through
-    generator_version = 4           # 2: a case gives eax, edx and ecx to a function that takes them (case_regs);
+    generator_version = 5           # 2: a case gives eax, edx and ecx to a function that takes them (case_regs);
                                     # 3: one that only pushes edx or ecx as a call's argument takes them;
-                                    # 4: a case answers the ports its runs read (ports)
+                                    # 4: a case answers the ports its runs read (ports); 5: padding reads
+                                    # no register (is_padding: regflow's reads, case_regs)
     refine_saved_writes = True              # dread.regflow refines a write of ebx, esi, edi or ebp too (taken as
                                             # all used): with three scratch registers, bytes pass through them
     SWITCH_MAX = 1024                       # table entries read at most
@@ -269,11 +270,39 @@ class X86:
 
     # ---- what instructions read and write ----
 
+    def is_padding(self, insn):
+        """Whether an instruction is one of the no-ops assemblers pad with: nop of any length (90, 66 90,
+        0f 1f with any operand and prefixes), and, for cores without the long nop (GNU as for -march=pentium,
+        FreeRTOS's IA32 demo), a lea of a 32-bit register to itself with displacement 0 (lea esi, [esi],
+        any encoding, a segment prefix included: lea computes no segment's address) and a mov or xchg of a
+        register to itself. They read and write nothing (reg_effects), the lifter writes no C for them, and
+        dread.lift takes them for padding where no path reaches them (GCC -O2's alignment of loop heads:
+        refused as "code no path from its entry reaches" until 2026-10-27)."""
+        m, ops = insn.mnemonic, insn.operands
+        if m == "nop":
+            return True
+        if len(ops) != 2:
+            return False
+        a, b = ops
+        if a.type != X.X86_OP_REG:
+            return False
+        lane = LANES.get(insn.reg_name(a.reg))
+        if lane is None or lane[0] == "sp":
+            return False
+        if m in ("mov", "xchg") and b.type == X.X86_OP_REG and b.reg == a.reg:
+            return lane[1] == M32 or m == "xchg"
+        if m == "lea" and b.type == X.X86_OP_MEM:
+            mem = b.mem
+            return lane[1] == M32 and mem.base == a.reg and not mem.index and mem.disp == 0
+        return False
+
     def reg_effects(self, insn):
         """(reads, writes): the registers an instruction reads and writes by name (the eight, "flags",
         "pc"), from capstone's lists with the implicit ones (push and pop: esp; mul and div: eax, edx;
         call and ret: esp). A write to a register's part (al, ax) keeps the rest: it reads the whole
         register too."""
+        if self.is_padding(insn):
+            return set(), set()             # (a no-op: lea esi, [esi] reads no esi of its caller's)
         try:
             r, w = insn.regs_access()
         except cs.CsError:

@@ -86,7 +86,7 @@ import sys
 from dread.arch import code_address
 from dread import target as tgt
 
-VERSION = 32                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 33                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -172,6 +172,8 @@ VERSION = 32                # 3: entry spills (variadic functions) are no use; 4
                             # edx as memcpy's first argument, and read eax alone
                             # 32: an x86 string instruction reads no flags (the direction flag alone, which
                             # the ABI keeps clear): rep movsl made FreeRTOS's inl hand its flags back
+                            # 33: x86's padding no-ops read nothing (the layer's is_padding: lea esi, [esi]
+                            # made every function GCC -O2 aligned a loop in take its caller's esi)
 
 
 class RegFlow:

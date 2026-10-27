@@ -70,7 +70,7 @@ def file_flags(target, path):
     for a REGPARM line (GCC and clang: the x86 lifter's C takes eax first, in eax, the stack arguments
     where cdecl has them)."""
     with open(path) as f:
-        lines = [f.readline() for _ in range(6)]
+        lines = [f.readline() for _ in range(8)]   # (up to seven lines of them: the lifter's and readable C's)
     flags = []
     if any(line.startswith(NULL_CHECKS) for line in lines):
         flags.append("-fno-delete-null-pointer-checks")
@@ -319,6 +319,13 @@ def lift_sources(target, image, names, outdir, quiet=False, lifter=None, src_cal
             text = result.text
             if transform is not None:
                 text = transform(name, text) or text
+            if not text.startswith(NULL_CHECKS):
+                # (compile_all reads it: -fno-delete-null-pointer-checks; first, so that the lines below
+                # land above it. Address 0 is memory on these targets, and the original reads it where a
+                # pointer is null; GCC at -O2 kept such a load and put ud2 behind it, the path being
+                # undefined to it: FreeRTOS's pcTimerGetName on the IA32 demo's -O2 build trapped after its
+                # assertion's stub returned)
+                text = "%s\n%s" % (NULL_CHECKS, text)
             saved = lifter.call_saved(fn)
             regparm = lifter.regparm_of(fn) if hasattr(lifter, "regparm_of") else getattr(lifter, "regparm", 0)
             if regparm:                     # (compile_all reads it: -mregparm=N; x86: 1, or 3 for a function

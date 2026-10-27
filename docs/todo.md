@@ -6494,7 +6494,10 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
       The bench took a patch that takes a file as of another commit ({file, commit}: file_at), a build
       key for the compiler DREAD compiles C with on the host (dread_cc), a patched linker script
       (the link took the source's), a fetch that applies sparse paths added since, and a digest of a
-      build without the sparse paths (docs/decisions.md). Not measured yet (lift, readable): next.
+      build without the sparse paths (docs/decisions.md). Measured on 2026-10-27 (asm, lift, readable,
+      at f37fafd): GCC 12 -Os 223 of 292 lifted, 222 of them readable; GCC 12 -O2 83 of 269 (83);
+      clang 16 -Os 177 of 276 (177); every listing identical. GCC -O2's padding then (below): 194 of
+      269 on a copy of its build.
     - [ ] The lift check with room (.data moved 256 KiB away): 102 of 293 accepted, 109 refused, 82
       dropped at first; with the steps below 189 accepted, 36 refused, 68 dropped (2026-10-27: 54 held
       back by coverage, 14 without cases, none whose cases disagree), and 206 with the PC's
@@ -6632,6 +6635,25 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         register; True where its frame cannot be followed). Five of the six lift now (their coverage
         keeps them out); prvQueueSetReceivingTask stays refused, rightly: xQueueGenericSend hands the
         address of its xTicksToWait on, and the word changes. tests/test_x86.py: back_r, back_w.
+      - [x] An assembler's padding is no code (2026-10-27): GCC -O2 for the Pentium (no long nop) pads
+        loop heads with lea esi, [esi] and lea edi, [edi], which read their register: every function so
+        padded took its caller's esi (dread.regflow; its callers refused with it) and the padding where no
+        path goes was "code no path from its entry reaches". The layer's is_padding (nop of any length,
+        lea of a register to itself, mov and xchg of one with itself) reads and writes nothing, the lifter
+        writes no C for it, and dread.lift takes it for padding (regflow VERSION 33, x86 generator 5). The
+        bench's GCC 12 -O2 build: 83 of 269 lifted before, 194 on a copy of it after.
+        tests/test_x86.py: padded.
+      - [x] Lifted C keeps reads through a null pointer (2026-10-27): every lifted (and readable) file has
+        the NULL_CHECKS line now, -fno-delete-null-pointer-checks; address 0 is memory on DREAD's targets,
+        and GCC at -O2 kept such a load and put ud2 behind it, the path being undefined to it
+        (pcTimerGetName on the -O2 build, behind its assertion). tests/test_x86.py: getname.
+      - [ ] clang aligns the stack in 14 functions of the bench's clang 16 -Os build (and esp, -16:
+        "changes the stack pointer in a way not modelled"): a frame whose base is computed at run time.
+      - [ ] bsr and bsf are not modelled (two functions in each bench build).
+      - [ ] Cases whose original runs into the limit: vGalileoLegacyGPIOInitializationForLED on the -O2
+        build failed 26 of 47 ("original: ... did not return within 200000 instructions"), while dread
+        trace runs the same cases to the end in both images: the generator's runs and the runner's
+        count the budget otherwise somewhere.
       - [ ] An input that has code read stack words nothing wrote (a length past a local:
         prvNotifyQueueSetContainer copies an item of the input's size from its 4-byte local) reads the
         original's frame layout, which the C's differs from; dread.fragile refuses it only where a saved

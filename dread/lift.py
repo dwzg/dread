@@ -1680,7 +1680,8 @@ class Lifter:
         """Why fn's C would free code that something outside the code enters, or None: code of fn that
         no path from its entry reaches (lifted.unreached, of fn's Lifted) and that nothing leads to (no
         instruction in front of it goes on to it, no direct jump or call of any function goes there,
-        no switch of fn), and that is not padding (zero bytes, the layer's nops). The core enters such
+        no switch of fn), and that is not padding (zero bytes, the layer's nops by their bytes or, with
+        is_padding, by their form: x86's lea esi, [esi]). The core enters such
         code at a vectored trap table's entries (mtvec + 4 * cause on RISC-V), and a function table may
         list the table as one function whose first entry jumps on (an untyped label in an object
         without mapping symbols: GCC 10's binutils, LLVM 14). Lifted, the C replaced its first entry
@@ -1705,12 +1706,13 @@ class Lifter:
                 targets.update(got[0] or ())
         ends = {a + i.size: i for a, i in insns.items() if i is not None}
         padding = getattr(self.arch, "padding", {}).get(self.prog.isa_at(fn.entry), ())
+        is_padding = getattr(self.arch, "is_padding", None)     # (the layer's no-ops by their form: x86)
         for a in unreached:
             insn, before = insns.get(a), ends.get(a)
             if insn is None or a in targets or (before is not None and self._goes_on(before)):
                 continue
             raw = bytes(self.prog.read(a, insn.size))
-            if not any(raw) or raw in padding:
+            if not any(raw) or raw in padding or (is_padding is not None and is_padding(insn)):
                 continue
             return ("0x%x (%s %s) is code no path from its entry reaches and no branch goes to: something "
                     "outside the code enters it (a vectored trap table's entry?), and its C would free it"
