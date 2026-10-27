@@ -6409,8 +6409,9 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
     both builds lifts but the startup and GCC's main (it aligns esp): 44 of 46 on GCC's build, 45 on
     clang's. A jump through a table is a switch over the index its bound check takes (script_run;
     clang's dispatch, its handlers inlined), GCC's dispatch a tail call through the pointer it loads
-    (switches.pointer_tail now also where the call pushed the return address). The lift check accepts 41
-    of GCC's functions and 43 of clang's; ram_crc runs from RAM, and two are dropped by their cases (below).
+    (switches.pointer_tail now also where the call pushed the return address). The lift check accepts 42
+    of GCC's functions (41 until dispatch's tail call was made a jump, below) and 43 of clang's; ram_crc
+    runs from RAM, and script_run is dropped by its cases (below).
     The fuzzer's x86 ISA (dread liftfuzz --isa x86: every width of the arithmetic with the flags, the
     shifts, mul, imul, div, setcc, cmovcc, lea, xchg, frame slots, push and pop, branches, cdecl calls)
     agrees on 800 random functions of 40 instructions (seeds 21 to 28, the last three on the final code).
@@ -6429,10 +6430,15 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
     --check (GCC's 41, clang's 43). What it took: eax handed in with -mregparm=1 from dread.build's REGPARM
     line instead of an attribute in the C's head: the readable passes write heads anew by pattern, read_line's
     lost its regparm(1) when the types pass gave it another type, and every argument was read a word off.
-  - [ ] GCC's dispatch on i386: its handlers, tail-called through the pointer, pass their argument on to
-    gpio_set by rewriting the stack arguments they came with, in dispatch's caller's frame; the C's call
-    passes copies, and the cases see the writes missing (dropped, rightly). A real tail jump from C is not
-    possible; asm, or a refusal with the reason, would say it plainly.
+  - [x] GCC's dispatch on i386 (2026-10-27): its handlers, tail-called through the pointer it loads, pass
+    their argument on to gpio_set by rewriting the stack arguments they came with, in dispatch's caller's
+    frame, and a C call passed copies. The C's tail call is now one the compiler must make a jump
+    (__attribute__((musttail)) return), with eax alone for GCC, which then writes no argument word: the
+    handlers find their arguments in the caller's words, as the original's do, and the lift check
+    accepts dispatch. clang's musttail takes the caller's signature, so there the arguments go along,
+    each written back into its own slot (where a callee would not write them, the cases see it).
+    dread.cparse reads a statement attribute in front of a return, and void_results leaves such a
+    return whole.
   - [ ] script_run on i386 (both builds): the generated cases miss an arm of its switch (index 1 on GCC's
     build: no input made keys_read's register come out 1 in its low three bits), where every ARM and
     RISC-V build's cases reach every arm. Not looked into further: why the search does not draw it here.

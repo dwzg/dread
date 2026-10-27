@@ -156,3 +156,20 @@ def test_an_instruction_s_absorbed_ones_ride_along_unseen():
     assert cparse.unparse_lines(tree.function("f"), style="readable") == [
         (None, "u32 f(u32 r0)"), (None, "{"), (8, "    r0 = g(r0);"), (0x14, "    r0 = h(r0);"),
         (0x18, "    return r0;"), (None, "}")]
+
+
+def test_a_statement_attribute_in_front_of_a_return_is_kept():
+    """The x86 lifter's tail call through a pointer: __attribute__((musttail)) in front of a return, read
+    with it and printed again (dread.readable keeps the jump the compiler must make)."""
+    from dread import cparse
+    text = """u32 f(u32 eax_in, u32 sa0)
+{
+    u32 eax = eax_in, s0 = 0;
+    s0 = *(volatile u32 *)(0x1000u);  /* 100: mov eax, dword ptr [0x1000] */
+    { __attribute__((musttail)) return ((u32 (*)(u32))(s0))(eax); }  /* 104: jmp eax */
+}
+"""
+    tree = cparse.parse(text)
+    fn = tree.function("f")
+    printed = cparse.function_text(fn) if hasattr(cparse, "function_text") else cparse.unparse(tree)
+    assert "__attribute__((musttail)) return ((u32 (*) ( u32 ))s0)(eax);" in printed, printed

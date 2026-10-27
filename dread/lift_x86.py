@@ -1040,8 +1040,13 @@ class X86Lifter(lift.Lifter):
         depth, values = self.ctx["states"][a]
         if depth == 0 and values.get(0) == self.RET and self._width(fn.name) == 1 \
                 and switches.pointer_tail(self.prog, fn, a):
-            words = [self._load(self._slot(-4 - 4 * k), 4) for k in range(self.ctx["stack_params"])]
-            return "{ s0 = %s; return ((u32 (*)(%s))(s0))(%s); }" % (
+            # A tail call the compiler must make a jump (musttail), with the stack arguments where they
+            # lie: GCC's with eax alone, which writes no argument word; clang's musttail takes the
+            # caller's signature, so ours go along, each written back into its own slot.
+            words = []
+            if self.prog.target.compiler.kind == "clang":
+                words = [self._load(self._slot(-4 - 4 * k), 4) for k in range(self.ctx["stack_params"])]
+            return "{ s0 = %s; __attribute__((musttail)) return ((u32 (*)(%s))(s0))(%s); }" % (
                 self._source(insn, insn.operands[0]), ", ".join(["u32"] * (1 + len(words))),
                 ", ".join(["eax"] + words))
         raise Refused("0x%x jumps through a register or memory to targets not known" % a)

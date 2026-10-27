@@ -162,7 +162,8 @@ def lift_gizmo(variant):
 def test_gizmo_i386_lifts():
     """dread.lift_x86 on both i386 builds: every function but the startup and GCC's main (they set the
     stack pointer and align it). A jump through a table is a switch (script_run; clang's dispatch, its
-    handlers inlined), GCC's dispatch a tail call through the pointer it loads. Every function's C takes eax as it
+    handlers inlined), GCC's dispatch a tail call through the pointer it loads, which the compiler must make a
+    jump (musttail: its handlers take their arguments from dispatch's caller's words). Every function's C takes eax as it
     comes (compiled with -mregparm=1) and its arguments through their addresses; a void function that does not write eax
     hands it back (uart_init: one store), GCC's pop eax that takes an argument off again is no read of it
     (print_status), and uart_puts reads edx behind uart_putc, whose code leaves it (GCC's interprocedural
@@ -173,7 +174,7 @@ def test_gizmo_i386_lifts():
     lifted, refused = lift_gizmo("i386")
     assert set(refused) == {"_start", "main"}, refused
     assert "switch (index) {" in lifted["script_run"].text
-    assert "return ((u32 (*)(u32, u32, u32))(s0))(eax," in lifted["dispatch"].text
+    assert "__attribute__((musttail)) return ((u32 (*)(u32))(s0))(eax);" in lifted["dispatch"].text
     target = Target.load(gizmo_dir("i386"))
     program = Program(target)
     lifter = lift.make_lifter(program, regflow.load(target, target.image(), program))
@@ -208,11 +209,11 @@ def i386_copy(tmp_path):
 
 
 # (not mul64: its written cases compare its result's upper half, which no caller in the image reads, so
-# the register flow cannot tell; nor script_run, whose generated cases miss one arm of its switch, nor
-# dispatch, whose tail-called handlers write the stack arguments they came with, which the C passes as
-# copies: docs/todo.md. uart_putc and uart_puts: the edx that GCC keeps across the call)
+# the register flow cannot tell; nor script_run, whose generated cases miss one arm of its switch:
+# docs/todo.md. uart_putc and uart_puts: the edx that GCC keeps across the call; dispatch: a tail call
+# through a pointer, made a jump)
 I386_NAMES = ["clamp", "checksum", "parse_uint", "fmt_hex", "sum6", "udiv_var", "uart_init", "print_status",
-              "strcmp", "parse_kv", "uart_putc", "uart_puts"]
+              "strcmp", "parse_kv", "uart_putc", "uart_puts", "dispatch"]
 
 
 def test_gizmo_i386_lift_check_accepts_what_agrees_and_drops_a_mistake(tmp_path, monkeypatch):

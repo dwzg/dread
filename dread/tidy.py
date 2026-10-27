@@ -393,8 +393,8 @@ def void_results(fn, run=None):
         return False
 
     def bare(s):
-        if isinstance(s, C.Return) and s.e is not None:
-            if has_effects(s.e):
+        if isinstance(s, C.Return) and s.e is not None and not getattr(s, "attrs", ""):
+            if has_effects(s.e):            # (not a musttail return: its call must stay a jump)
                 return C.Block([C.ExprStmt(s.e, s.addr), C.Return(None, s.addr)], s.addr)
             s.e = None
             return s

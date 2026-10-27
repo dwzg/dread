@@ -397,10 +397,10 @@ class Label(Stmt):
 
 
 class Return(Stmt):
-    __slots__ = _stmt_slots("e")
+    __slots__ = _stmt_slots("e", "attrs")   # attrs: a statement attribute in front (the x86 lifter's musttail)
 
-    def __init__(self, e=None, addr=None):
-        self.e, self.addr = e, addr
+    def __init__(self, e=None, addr=None, attrs=""):
+        self.e, self.addr, self.attrs = e, addr, attrs
 
 
 class While(Stmt):
@@ -739,6 +739,14 @@ class Parser:
                 e = None if self.at(";") else self.expr()
                 self.expect(";")
                 return Return(e)
+            if x == "__attribute__":        # a statement attribute in front of a return (musttail); else a
+                start = self.i              # declaration's (aligned locals), read as before
+                attrs = self.attributes()
+                if self.at("return"):
+                    s = self._statement(self.peek())
+                    s.attrs = attrs
+                    return s
+                self.i = start
             if x == "while":
                 self.next()
                 self.expect("(")
@@ -1232,7 +1240,8 @@ class Printer:
         if isinstance(s, Goto):
             return "goto %s;" % s.label
         if isinstance(s, Return):
-            return "return;" if s.e is None else "return %s;" % expr_text(s.e)
+            text = "return;" if s.e is None else "return %s;" % expr_text(s.e)
+            return "%s %s" % (s.attrs, text) if getattr(s, "attrs", "") else text
         if isinstance(s, Break):
             return "break;"
         if isinstance(s, Continue):
