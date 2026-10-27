@@ -191,6 +191,18 @@ DREAD_PORT_OUT(dread_out32, u32, "outl")
 /* rdtsc: the time-stamp counter, which the emulator answers from a counter of its own (dread.emu) */
 static inline __attribute__((always_inline)) u64 dread_rdtsc(void)
 { u32 lo, hi; __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi)); return ((u64)hi << 32) | lo; }
+/* a segment register's selector, read as the original reads it (mov r32, sreg: zero-extended), which the
+   firmware's startup set: the same in both images (FreeRTOS's IA32 port puts cs into its IDT's gates and
+   a task's first iret frame) */
+#define DREAD_SEGMENT(name, reg) \
+    static inline __attribute__((always_inline)) u32 name(void) \
+    { u32 v; __asm__ volatile ("movl %%" reg ", %0" : "=r"(v)); return v; }
+DREAD_SEGMENT(dread_cs, "cs")
+DREAD_SEGMENT(dread_ds, "ds")
+DREAD_SEGMENT(dread_es, "es")
+DREAD_SEGMENT(dread_ss, "ss")
+DREAD_SEGMENT(dread_fs, "fs")
+DREAD_SEGMENT(dread_gs, "gs")
 #endif
 
 #endif

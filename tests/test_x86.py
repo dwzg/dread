@@ -2131,3 +2131,76 @@ def test_far_jumps_and_the_instructions_that_end_a_block():
         ("pop es", b"\x07"), ("mov cr0", b"\x0f\x22\xc0"), ("cli", b"\xfa"), ("pushfd", b"\x9c"),
         ("mov fs", b"\x8e\xe0"), ("nop", b"\x90"), ("pause", b"\xf3\x90"))}
     assert [n for n, e in ends.items() if e] == ["sti", "popfd", "mov ss", "mov ds", "pop es", "mov cr0"], ends
+
+
+SELECTOR_C = r"""
+typedef unsigned int u32;
+typedef unsigned short u16;
+#define UART_DATA (*(volatile u32 *)0x10000000u)
+
+__asm__(".text\n.globl _start\n.type _start, @function\n_start:\n\tlgdt gdt_desc\n\tljmp $0x08, $1f\n"
+        "1:\tmovl $0x10, %eax\n\tmovl %eax, %ds\n\tmovl %eax, %es\n\tmovl %eax, %ss\n\tmovl $0x20010000, %esp\n"
+        "\tcall main\n2:\thlt\n\tjmp 2b\n.size _start, . - _start\n"
+        ".section .rodata\n.p2align 3\ngdt:\n\t.quad 0\n\t.quad 0x00cf9b000000ffff\n\t.quad 0x00cf93000000ffff\n"
+        "gdt_desc:\n\t.word 23\n\t.long gdt\n.text\n");
+
+u32 idt[2];
+
+__attribute__((noinline)) void gate(u32 handler, u32 *slot)
+{
+    u16 cs;
+    __asm__ volatile ("mov %%cs, %0" : "=r"(cs));
+    slot[0] = (handler & 0xffffu) | ((u32)cs << 16);
+    slot[1] = (handler & 0xffff0000u) | 0x8e00u;
+}
+
+__attribute__((noinline)) u32 selector(void)
+{
+    u32 cs;
+    __asm__ volatile ("movl %%cs, %0" : "=r"(cs));
+    return cs + 1;
+}
+
+int main(void)
+{
+    gate(0x12345678u, idt);
+    UART_DATA = idt[0];
+    UART_DATA = idt[1];
+    UART_DATA = selector();
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_segment_register_is_read_as_the_original_reads_it(tmp_path):
+    """FreeRTOS's IA32 port reads cs (mov dx, cs; mov edx, cs) for its IDT's gates and a task's first iret
+    frame. The lifter reads it through dread.h's dread_cs, the same instruction, so the C sees the
+    selector the startup loaded: in the system run 0x08 (the startup's own GDT), and the device log of
+    the rebuilt image, gate and selector lifted, is the original's. (The generated cases cannot tell:
+    in the function-level harness cs is 0. Until 2026-10-27 the lifter refused the read.)"""
+    import json
+    from dread import build, lift, sysrun
+    from dread.target import Target
+    target = small_i386(tmp_path, SELECTOR_C, name="selector")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    root = tmp_path / "selector"
+    toml = (root / "dread.toml").read_text()
+    (root / "dread.toml").write_text(toml.replace("\nstack = ", "\nio = [[0x10000000, 0x10010000]]\nstack = ")
+                                     + MOVED_TOML.replace('[scenarios.abc]\nuntil = {uart = "abc"}', "[scenarios.gates]"))
+    target = Target.load(str(root))
+    image = target.image()
+    lines = []
+    assert sorted(lift.check(target, image, ["gate", "selector"], out=lines.append, jobs=2)) == ["gate", "selector"], lines
+    text = {p.stem: p.read_text() for p in (root / "build" / "lift-check" / image.name / "lifted").glob("*.c")}
+    assert "dread_cs()" in text["gate"] and "dread_cs()" in text["selector"], sorted(text)
+    out = build.build(target, image, quiet=True)
+    with open(os.path.join(os.path.dirname(out), "placement.json")) as f:
+        placement = json.load(f)["functions"]
+    assert {"gate", "selector"} <= set(placement)
+    with open(out, "rb") as f:
+        a, b = _both_runs(target, f.read(), placement, scenario=target.scenarios["gates"])
+    writes = [entry[4] for entry in a.log if entry[0] == "write"]
+    assert writes == [0x00085678, 0x12348e00, 9], [hex(w) for w in writes]
+    assert a.log == b.log and sysrun.compare(a, b) == [], (a.log, b.log)

@@ -6625,6 +6625,16 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         VERSION 32). tests/test_x86.py: kbd polls a status port and reads the data port.
       - [ ] Pushes of every register, iret (the port's assembly and the support code: refused, rightly for
         now).
+      - [x] Reading a segment register (2026-10-27; "reads cs: not modelled", two to four functions in each
+        bench build: pxPortInitialiseStack, vPortSetupIDT, xPortInstallInterruptHandler,
+        xPortStartScheduler, prvSetInterruptGate, mov edx, cs or mov dx, cs for an IDT gate or a task's
+        first iret frame): the lifter reads it through dread.h's dread_cs ... (the same instruction, mov
+        r32, sreg), so the C sees the selector the firmware's startup loaded. The generated cases cannot
+        tell (in the function-level harness cs is 0, in both images); the system run can, where the
+        startup loads a GDT: tests/test_x86.py segment_register_is_read (cs 0x08, gate and selector
+        lifted, the device log the original's; with the selector dropped in the C the lift check's whole
+        image differs and drops gate). Not measured on the bench builds yet. A harness with a GDT of its
+        own (cs not 0) would let cases tell.
       - [x] Three of the trial build's disagreements traced to their cause (2026-10-27): (1) GCC 16
         reorders two volatile loads: mov eax, [ebx + 0x38]; cmp [ebx + 0x3c], eax lifted, combine folds
         the later load into the compare and then the earlier one too (cmp mem, mem matches i386's pattern

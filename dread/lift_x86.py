@@ -80,6 +80,7 @@ STRING_OPS = ("movsb", "movsw", "movsd", "stosb", "stosw", "stosd")     # (_stri
 BARRIER = '__asm__ volatile ("" ::: "memory");'     # (insn: where GCC could reorder two volatile loads)
 KEEP_CALL = '__asm__ volatile ("");'    # (_call: behind a call with stack arguments, so that it stays one)
 MUSTTAIL = "typedef unsigned (*f_)(unsigned);\nunsigned g_(f_ p, unsigned x) { __attribute__((musttail)) return p(x); }\n"
+SEGMENTS = ("cs", "ds", "es", "ss", "fs", "gs")       # (_value: read through dread.h's dread_cs ...)
 NOPS = ("nop", "cld", "endbr32", "pause")   # cld: the direction flag is clear at every call (the ABI)
 ARITH = ("add", "adc", "sub", "sbb", "cmp", "and", "or", "xor", "test")
 SHIFTS = ("shl", "sal", "shr", "sar", "rol", "ror")
@@ -736,8 +737,12 @@ class X86Lifter(lift.Lifter):
         return self._slot(self.ctx["depth"][self.insn_now.address] - k)
 
     def _value(self, insn, op):
-        """The C expression of a register operand's value (u32; a part's bits at the bottom)."""
+        """The C expression of a register operand's value (u32; a part's bits at the bottom). A segment
+        register's selector is read by the same instruction (dread.h's dread_cs ...: mov r32, sreg), as
+        FreeRTOS's IA32 port does for its IDT's gates; until 2026-10-27 such a read was refused."""
         name = insn.reg_name(op.reg)
+        if name in SEGMENTS:
+            return "dread_%s()" % name
         lane = LANES.get(name)
         if lane is None:
             raise Refused("0x%x reads %s: not modelled" % (insn.address, name))
