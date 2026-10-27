@@ -16,7 +16,9 @@ permissions:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60       # (the suite takes about 20; a hang ran 45 minutes and more before it was cancelled)
+    timeout-minutes: 90       # (2026-10-27: the cross compilers' install up to 11 minutes, the suite 32 to 48 on
+                              # 3.11 and up to 48 on 3.13, which the 60 of before cancelled at 96 %; a hung test
+                              # shows its stacks after 300 s anyway: faulthandler_timeout below)
     strategy:
       fail-fast: false
       matrix:
