@@ -6518,7 +6518,10 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         tests/test_x86.py: pick(p, n, k) reaches both arms.
         A stub logs what such a callee reads of eax, edx and ecx (the layer's stub_regs, which reads_mask
         goes by on x86: by the ABI's argument registers, which cdecl has none of, a stub logged no
-        register argument there).
+        register argument there). A stop logs them as a stub does (2026-10-27: it took the mask's
+        places from the stub's arguments, cdecl's stack words on x86, which differ with the frame's
+        layout; FreeRTOS's vTaskDelay disagreed on the stack words where its callee's edx is), and the
+        words a printf format takes beyond the named ones are stack words there.
       - [x] Calls of a variadic function (2026-10-27): the words a call passes came from the callee's
         stack analysis, which for printf sees the format alone; the original pushes the format, the file
         and the line, the C passed one word, printf read a file name from elsewhere and prints faulted

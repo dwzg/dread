@@ -656,6 +656,62 @@ def test_a_tail_call_passes_its_own_stack_arguments(tmp_path):
     assert lift.check(target, image, ["wrap"], out=lines.append, jobs=2) == ["wrap"], lines
 
 
+HALT_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+
+static __attribute__((noinline, noreturn)) void halt(u32 a, u32 b)
+{
+    sink[0] = a;
+    sink[1] = b;
+    for (;;)
+        ;
+}
+
+u32 guard(u32 x, u32 y)
+{
+    if (x > 3)
+        halt(x + 1, y);
+    return x + y;
+}
+
+void _start(void)
+{
+    sink[2] = guard(5, 6);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_stop_logs_the_registers_its_callee_takes(tmp_path):
+    """halt never returns and takes its arguments in eax and edx (GCC's regparm(3) for a static
+    function): a run of guard that calls it ends there, and the stop logs eax and edx, as a stub of
+    halt would. It logged the stack words at those places of the mask (on x86 the stub's arguments are
+    cdecl's stack words), which differ with the frame's layout: FreeRTOS's vTaskDelay disagreed so."""
+    target = small_i386(tmp_path, HALT_C, "halt")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import lift, regflow
+    from dread.autocase import Generator
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    halt, guard = program.by_name["halt"], program.by_name["guard"]
+    if lift.make_lifter(program, regflow.load(target, image, program)).reg_args(halt) != ("eax", "edx", "ecx"):
+        pytest.skip("this GCC did not give halt its arguments in registers")
+    gen = Generator(target, image)
+    case = {"args": [7, 9], "mem": [], "returns": [], "calls": [], "frame": 0, "stops": [halt.entry],
+            "hang": True, "limit": 20000}
+    m = gen.machine()
+    m.plan = []
+    gen.apply(m, case)
+    m.call(guard.entry, 7, 9, max_instructions=20000)
+    assert list(m.calls[-1]) == ["call 0x%x, never returns" % halt.entry, 8, 9], m.calls
+    lines = []
+    assert lift.check(target, image, ["guard"], out=lines.append, jobs=2) == ["guard"], lines
+
+
 PICK_C = r"""
 typedef unsigned int u32;
 volatile u32 sink[4];

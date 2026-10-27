@@ -699,8 +699,10 @@ class Generator:
             # a cached case of FreeRTOS's GCC -O0 prvCoreATask overwrote its loop counter otherwise and
             # faulted in the original)
             shown = seen
-            more = self.format_mask(m, args, taking[target]) & ~nargs if target in taking else 0
-            if more:
+            more = self.format_mask(m, args, taking[target]) if target in taking else 0
+            if more and stub_regs:          # (x86: args are cdecl's stack words, nargs's bits registers)
+                shown = seen + [args[i] for i in range(nstack, len(args)) if more >> i & 1]
+            elif more & ~nargs:
                 shown = [args[i] for i in range(len(args)) if (nargs | more) >> i & 1] + words
             m.log("call 0x%x" % target, *("stack" if in_stack(a) else a for a in shown))
             # A callee handed the address of a local usually stores a result there; the stub does
@@ -761,8 +763,13 @@ class Generator:
                     return got
             # What it reads of the call's registers, as a stub logs it (stop_mask; until 2026-10-26 the
             # call alone, and the arguments of the call that ends the run were compared by nothing)
-            mask = self.stop_mask(target) | (self.format_mask(m, args, taking[target]) if target in taking else 0)
-            seen = [args[i] for i in range(len(args)) if mask >> i & 1]
+            mask = self.stop_mask(target)
+            more = self.format_mask(m, args, taking[target]) if target in taking else 0
+            if stub_regs:                   # (x86: the mask's registers as a stub logs them, and the stack
+                seen = [m.reg(r) for i, r in enumerate(stub_regs) if mask >> i & 1] + \
+                    [args[i] for i in range(len(args)) if more >> i & 1]    # words a format takes)
+            else:
+                seen = [args[i] for i in range(len(args)) if (mask | more) >> i & 1]
             m.log("call 0x%x, never returns" % target, *("stack" if in_stack(a) else a for a in seen))
             m.stopped_at = "never returns"
             m.uc.emu_stop()
