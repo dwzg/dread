@@ -5453,3 +5453,9 @@ added where they help, the user, 2026-10-21).
   so register flow decides whether the value matters there (c_uses: a call reads eax only where the
   callee takes it, else GCC's pop eax that takes an argument off again before the next call looked
   like a read of that argument).
+- **Changed the same day:** the attribute became a compile flag. dread.readable writes a function's head
+  anew by pattern, and read_line's lost its regparm(1) when the types pass gave it another type: every
+  argument was read a word off, and its readable C failed. The lifter's C now carries no attribute;
+  dread.build writes a REGPARM line ahead of each file of it (Lifter.regparm), which compile_all turns
+  into -mregparm=1 for GCC and clang: every function of the file, its calls through pointers included,
+  takes eax so.

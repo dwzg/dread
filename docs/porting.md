@@ -113,8 +113,10 @@ needed on it):
   does not. `dread.lift_x86` follows the MSP430 lifter's plan (a pushed return address, every argument
   on the stack) and needed two things more: a register handed in and on (eax: cdecl passes nothing in a
   register, but a function that does not write eax hands its caller's eax back, which the cases compare;
-  the C takes it with GCC's regparm(1), the stack arguments staying where cdecl has them; its ARGS is
-  ("eax",), and c_uses has a call read it only where the callee takes it), and an entry analysis that
+  the C is compiled with -mregparm=1, the stack arguments staying where cdecl has them: the lifter's
+  `regparm`, which dread.build writes as a REGPARM line ahead of each file, so that readable C, whose
+  heads are written anew, keeps it; its ARGS is ("eax",), and c_uses has a call read it only where the
+  callee takes it), and an entry analysis that
   leaves out what an instruction reads only to keep the rest of a register whose part it writes (the
   layer's merge_only: mov bl, cl).
 - `dread.elfimport`: ARM dispatch slots and padding between functions (other architectures skip

@@ -163,7 +163,7 @@ def test_gizmo_i386_lifts():
     """dread.lift_x86 on both i386 builds: every function but the startup and GCC's main (they set the
     stack pointer and align it). A jump through a table is a switch (script_run; clang's dispatch, its
     handlers inlined), GCC's dispatch a tail call through the pointer it loads. Every function's C takes eax as it
-    comes (regparm(1)) and its arguments through their addresses; a void function that does not write eax
+    comes (compiled with -mregparm=1) and its arguments through their addresses; a void function that does not write eax
     hands it back (uart_init: one store), GCC's pop eax that takes an argument off again is no read of it
     (print_status), and uart_puts reads edx behind uart_putc, whose code leaves it (GCC's interprocedural
     register allocation): uart_putc's C keeps edx (-fcall-saved-edx), and the call does not clear it."""
@@ -173,7 +173,7 @@ def test_gizmo_i386_lifts():
     lifted, refused = lift_gizmo("i386")
     assert set(refused) == {"_start", "main"}, refused
     assert "switch (index) {" in lifted["script_run"].text
-    assert "return ((u32 (__attribute__((regparm(1))) *)(u32, u32, u32))(s0))(eax," in lifted["dispatch"].text
+    assert "return ((u32 (*)(u32, u32, u32))(s0))(eax," in lifted["dispatch"].text
     target = Target.load(gizmo_dir("i386"))
     program = Program(target)
     lifter = lift.make_lifter(program, regflow.load(target, target.image(), program))
@@ -181,7 +181,7 @@ def test_gizmo_i386_lifts():
     call = [line for line in lifted["uart_puts"].text.splitlines() if "uart_putc(eax" in line][0]
     assert "ecx = 0; cf = zf = sf = of = 0;" in call and "edx = 0" not in call
     text = lifted["clamp"].text
-    assert "u32 __attribute__((regparm(1))) clamp(u32 eax_in, u32 sa0, u32 sa1, u32 sa2)" in text
+    assert "u32 clamp(u32 eax_in, u32 sa0, u32 sa1, u32 sa2)" in text
     assert "ecx = *(volatile u32 *)((u32)&sa0);  /* 800019a: mov ecx, dword ptr [ebp + 8] */" in text
     assert "{ s0 = ecx; if ((zf | (sf != of))) edx = s0; }  /* 80001a6: cmovle edx, ecx */" in text
     init = lifted["uart_init"].text
@@ -190,6 +190,21 @@ def test_gizmo_i386_lifts():
     lifted, refused = lift_gizmo("i386clang")
     assert set(refused) == {"_start"}, refused
     assert "switch (index) {" in lifted["dispatch"].text and "switch (index) {" in lifted["script_run"].text
+
+
+def i386_copy(tmp_path):
+    """gizmo in tmp_path (its builds share sources) with gizmo-i386's cached generated cases and register
+    flow, and nothing written by hand in it: every function lifts."""
+    from dread.target import Target
+    from conftest import GIZMO
+    copy = tmp_path / "gizmo"
+    shutil.copytree(GIZMO, copy, ignore=shutil.ignore_patterns("build"))
+    for cache in ("autocases", "regflow"):
+        here = os.path.join(gizmo_dir("i386"), "build", cache)
+        if os.path.isdir(here):
+            shutil.copytree(here, copy / "i386" / "build" / cache)
+    os.remove(copy / "i386" / "src" / "rewritten.c")
+    return Target.load(str(copy / "i386"))
 
 
 # (not mul64: its written cases compare its result's upper half, which no caller in the image reads, so
@@ -207,16 +222,7 @@ def test_gizmo_i386_lift_check_accepts_what_agrees_and_drops_a_mistake(tmp_path,
     if not _compiles("i386", tmp_path):
         pytest.skip("needs the host's gcc with -m32")
     from dread import build, lift, lift_x86
-    from dread.target import Target
-    from conftest import GIZMO
-    copy = tmp_path / "gizmo"
-    shutil.copytree(GIZMO, copy, ignore=shutil.ignore_patterns("build"))
-    for cache in ("autocases", "regflow"):
-        here = os.path.join(gizmo_dir("i386"), "build", cache)
-        if os.path.isdir(here):
-            shutil.copytree(here, copy / "i386" / "build" / cache)
-    os.remove(copy / "i386" / "src" / "rewritten.c")       # (nothing written by hand: all of them lift)
-    target = Target.load(str(copy / "i386"))
+    target = i386_copy(tmp_path)
     image = target.image()
     lines = []
     accepted = lift.check(target, image, I386_NAMES, out=lines.append, jobs=4)
@@ -258,3 +264,44 @@ def test_a_planted_x86_mistake_shows_and_is_reduced(tmp_path, monkeypatch):
     assert failures and not refused, "\n".join(lines)
     reduced = [line for line in lines if line.startswith("reduced")]
     assert len(reduced) == 1 and len(reduced[0].split(" to: ")[1].split(" | ")) <= 6, reduced
+
+
+def test_the_x86_c_takes_eax_in_eax(tmp_path):
+    """dread.build writes a REGPARM line ahead of the x86 lifter's C (Lifter.regparm), which compile_all
+    turns into -mregparm=1 for GCC and clang: eax_in in eax, the stack arguments where cdecl has them. In
+    the C's text it would be an attribute, which dread.readable's new heads would not keep."""
+    from dread import build
+    from dread.target import Target
+    target = Target.load(gizmo_dir("i386"))
+    source = tmp_path / "f.c"
+    source.write_text("%s1 */\nu32 f(u32 eax_in, u32 sa0) { return eax_in + sa0; }\n" % build.REGPARM)
+    assert "-mregparm=1" in build.file_flags(target, str(source))
+    out = tmp_path / "lifted"
+    from dread import lift, regflow
+    from dread.program import Program
+    program = Program(target)
+    lifter = lift.make_lifter(program, regflow.load(target, target.image(), program))
+    build.lift_sources(target, target.image(), ["clamp"], str(out), lifter=lifter, quiet=True)
+    assert open(out / "clamp.c").readline().startswith(build.REGPARM + "1 */")
+
+
+def test_gizmo_i386_readable_c_passes_its_gate(tmp_path):
+    """dread readable on gizmo-i386: the types pass writes read_line's head anew (its eax a signed value:
+    uart_getc returns -1 for nothing), eax still first. The C takes eax in eax because dread.build compiles
+    it with -mregparm=1 (its REGPARM line); an attribute in the head's text was lost there, and every
+    argument was read a word off. The readable C of these functions passes the cases their lifted C passed."""
+    if not _compiles("i386", tmp_path):
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import lift, readable
+    target = i386_copy(tmp_path)
+    image = target.image()
+    names = ["read_line", "clamp", "uart_puts", "checksum"]
+    lines = []
+    assert sorted(lift.check(target, image, names, out=lines.append, jobs=4)) == sorted(names), lines
+    lines = []
+    assert sorted(readable.check(target, image, out=lines.append, jobs=4)) == sorted(names), lines
+    out = tmp_path / "readable"
+    assert readable.main(["--target", str(tmp_path / "gizmo" / "i386"), "--out", str(out), "read_line"]) == 0
+    import re
+    head = re.search(r"^\w+ read_line\((\w+) (\w+), u32 sa0, u32 sa1\)$", (out / "read_line.c").read_text(), re.M)
+    assert head and head.group(1) == "s32" and head.group(2).startswith("eax"), head

@@ -22,8 +22,10 @@ parameters sa0, sa1, ..., and an access of one goes through the parameter's addr
 in the slot the caller passed it in once its address is taken: the C reads and writes where the
 original does. A call passes the words of its frame that lie where the callee reads them (at sp and
 above when it calls: GCC pushes them, or stores them at esp + k), and eax: every function's C takes
-eax as it comes, in eax (GCC's regparm(1), the stack arguments where cdecl has them, so that original
-callers and callees keep theirs), since a function that does not write eax hands its caller's eax back,
+eax as it comes, in eax (compiled with -mregparm=1, dread.build's REGPARM line: the stack arguments
+stay where cdecl has them, so that original callers and callees keep theirs; an attribute in the text
+would not survive dread.readable, which writes heads anew), since a function that does not write eax
+hands its caller's eax back,
 and the cases compare a void function's result register too (gizmo's uart_init: one store and ret). A
 call takes eax, or eax and edx where the callers read a 64-bit result (dread.regflow); ecx, edx (or
 ecx alone) and the flags are 0 behind it. A call through a register or memory passes the lowest
@@ -53,11 +55,11 @@ from dread.arch.x86 import FULL, LANES, M32
 from dread.lift import IDENT, INDIRECT_STACK_WORDS, Refused
 
 REGS = ["eax", "ecx", "edx", "ebx", "esi", "edi", "ebp"]
-# cdecl passes every argument on the stack. eax is handed in and on all the same (regparm(1): eax_in, a
-# first parameter in eax, the stack arguments where cdecl has them): a function that does not write eax
-# returns what its caller left there, which the cases compare (a void function's result register too)
+# cdecl passes every argument on the stack. eax is handed in and on all the same (the C is compiled with
+# -mregparm=1: eax_in, a first parameter in eax, the stack arguments where cdecl has them): a function
+# that does not write eax returns what its caller left there, which the cases compare (a void
+# function's result register too)
 ARGS = ("eax",)
-REGPARM = "__attribute__((regparm(1)))"
 SCRATCH = ("eax", "ecx", "edx")
 AFTER_CALL = set(SCRATCH) | {"flags"}
 RESULTS = {1: ("eax",), 2: ("eax", "edx")}
@@ -88,6 +90,7 @@ def _mask(size):
 
 class X86Lifter(lift.Lifter):
     REGS, ARGS, AFTER_CALL = REGS, ARGS, AFTER_CALL
+    regparm = 1                             # dread.build compiles the C with -mregparm=1 (its REGPARM line)
     MORE = ()                               # results are as wide as the callers read them (eax, edx): no entry
     seed_switches = True
 
@@ -1016,8 +1019,8 @@ class X86Lifter(lift.Lifter):
         dread.lift.INDIRECT_STACK_WORDS), where the original's callee would find stack arguments."""
         d = self.ctx["depth"][self.insn_now.address]
         words = [self._load(self._slot(d - 4 * k), 4) for k in range(min(d // 4, INDIRECT_STACK_WORDS))]
-        return ("{ s0 = %s; eax = ((u32 (%s *)(%s))(s0))(%s); ecx = edx = 0; cf = zf = sf = of = 0; }"
-                % (fp, REGPARM, ", ".join(["u32"] * (1 + len(words))), ", ".join(["eax"] + words)))
+        return ("{ s0 = %s; eax = ((u32 (*)(%s))(s0))(%s); ecx = edx = 0; cf = zf = sf = of = 0; }"
+                % (fp, ", ".join(["u32"] * (1 + len(words))), ", ".join(["eax"] + words)))
 
     def _indirect_jump(self, insn):
         """A jump through a register or memory: a switch whose targets dread.switches finds for every
@@ -1038,8 +1041,8 @@ class X86Lifter(lift.Lifter):
         if depth == 0 and values.get(0) == self.RET and self._width(fn.name) == 1 \
                 and switches.pointer_tail(self.prog, fn, a):
             words = [self._load(self._slot(-4 - 4 * k), 4) for k in range(self.ctx["stack_params"])]
-            return "{ s0 = %s; return ((u32 (%s *)(%s))(s0))(%s); }" % (
-                self._source(insn, insn.operands[0]), REGPARM, ", ".join(["u32"] * (1 + len(words))),
+            return "{ s0 = %s; return ((u32 (*)(%s))(s0))(%s); }" % (
+                self._source(insn, insn.operands[0]), ", ".join(["u32"] * (1 + len(words))),
                 ", ".join(["eax"] + words))
         raise Refused("0x%x jumps through a register or memory to targets not known" % a)
 
@@ -1052,10 +1055,9 @@ class X86Lifter(lift.Lifter):
             widest[name] = max(widest.get(name, 1), width)
             words[name] = nstack
         for name, width in sorted(widest.items()):
-            lines.append("extern %s %s %s(%s);" % (CTYPES[width], REGPARM, name,
-                                                     ", ".join(["u32"] * (1 + words[name]))))
+            lines.append("extern %s %s(%s);" % (CTYPES[width], name, ", ".join(["u32"] * (1 + words[name]))))
         params = ["u32 eax_in"] + ["u32 sa%d" % k for k in range(ctx["stack_params"])]
-        lines.append("%s %s %s(%s)" % (CTYPES[self._width(fn.name)], REGPARM, fn.name, ", ".join(params)))
+        lines.append("%s %s(%s)" % (CTYPES[self._width(fn.name)], fn.name, ", ".join(params)))
         lines.append("{")
         lines.append("    u32 %s;" % ", ".join("%s = %s" % (r, "eax_in" if r == "eax" else "0") for r in REGS))
         lines.append("    u32 cf = 0, zf = 0, sf = 0, of = 0, s0 = 0, d0 = 0, e0 = 0, a0 = 0, k0 = 0;")

@@ -55,6 +55,7 @@ CALL_SAVED = "/* dread: call-saved "     # a lifted file's first line: registers
 FIXED = "/* dread: fixed "               # ... or registers the C gets as the caller left them (handed)
 NULL_CHECKS = "/* dread: null checks kept */"   # readable C with pointers (dread.shapes): address 0 is memory
 WRAPS = "/* dread: overflow wraps */"       # readable C with typed variables (dread.vartypes): arithmetic wraps
+REGPARM = "/* dread: regparm "           # ... or the first arguments in registers (Lifter.regparm: x86's eax)
 
 
 def file_flags(target, path):
@@ -65,7 +66,9 @@ def file_flags(target, path):
     lose its comparisons of that pointer with 0, and address 0 is memory on these targets);
     -fno-strict-overflow for a WRAPS line (-fwrapv and -fwrapv-pointer for GCC 8 and later and clang 23;
     an older clang's -fwrapv-pointer is not confirmed): readable C with signed variables and typed
-    pointers (dread.vartypes) computes what the lifted C's u32 arithmetic did, which wraps."""
+    pointers (dread.vartypes) computes what the lifted C's u32 arithmetic did, which wraps; -mregparm=N
+    for a REGPARM line (GCC and clang: the x86 lifter's C takes eax first, in eax, the stack arguments
+    where cdecl has them)."""
     with open(path) as f:
         lines = [f.readline() for _ in range(6)]
     flags = []
@@ -73,6 +76,9 @@ def file_flags(target, path):
         flags.append("-fno-delete-null-pointer-checks")
     if any(line.startswith(WRAPS) for line in lines):
         flags.append("-fno-strict-overflow")
+    for line in lines:
+        if line.startswith(REGPARM):
+            flags.append("-mregparm=" + line[len(REGPARM):].split("*/")[0].strip())
     if target.compiler.kind != "gcc":
         return flags
     for line in lines:
@@ -314,6 +320,9 @@ def lift_sources(target, image, names, outdir, quiet=False, lifter=None, src_cal
             if transform is not None:
                 text = transform(name, text) or text
             saved = lifter.call_saved(fn)
+            regparm = getattr(lifter, "regparm", 0)
+            if regparm:                     # (compile_all reads it: -mregparm=N)
+                text = "%s%d */\n%s" % (REGPARM, regparm, text)
             handed = getattr(result, "handed", None)
             if handed:                      # (compile_all reads it: GCC's -ffixed-REG)
                 text = "%s%s */\n%s" % (FIXED, " ".join(handed), text)

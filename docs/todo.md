@@ -6425,6 +6425,10 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
     parts read outside register_only in dread.regflow's bits, generic stubs that answer edx for a callee
     whose callers read it (edx is no argument register: the C's edx at a call is its compiler's), and a
     case generator that has nothing to vary (no argument, load or call: uart_init).
+  - [x] Readable C on gizmo-i386 (2026-10-27): every lifted function of both builds passes dread readable
+    --check (GCC's 41, clang's 43). What it took: eax handed in with -mregparm=1 from dread.build's REGPARM
+    line instead of an attribute in the C's head: the readable passes write heads anew by pattern, read_line's
+    lost its regparm(1) when the types pass gave it another type, and every argument was read a word off.
   - [ ] GCC's dispatch on i386: its handlers, tail-called through the pointer, pass their argument on to
     gpio_set by rewriting the stack arguments they came with, in dispatch's caller's frame; the C's call
     passes copies, and the cases see the writes missing (dropped, rightly). A real tail jump from C is not
@@ -6435,8 +6439,8 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   - [ ] mul64's width: its written cases compare edx, which no caller in the image reads, so the lift
     check takes it as one word (the dread.regflow width of a function nobody calls).
   - [ ] The parity and auxiliary flags (jp, setnp, lahf, pushfd: refused), string instructions with a
-    compare (repe cmpsb), the stack's alignment in main (and esp, -16), then readable C on x86 and a
-    larger open-source target.
+    compare (repe cmpsb), the stack's alignment in main (and esp, -16), then a larger open-source target
+    (a FreeRTOS port for i386?).
 - [ ] AVR on the emulator interface the MSP430 work brings (clang builds it, Unicorn does not run
   it): an interpreter behind it, Harvard memory (program and data spaces) in the program database.
 - [ ] Z80 (low priority; the user, 2026-10-19: "Z80 and later 8051, but both low in prio"): an engine
