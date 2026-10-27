@@ -6668,6 +6668,17 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         timer functions of each bench build had no case for it (GCC: prvProcessExpiredTimer, prvReloadTimer,
         xSecondTimerHandler; clang: xFirstTimerHandler instead of the last); all six pass the lift check now.
         tests/test_x86.py: callit.
+      - [ ] prvTimerTask's loop cases (both -Os bench builds: "only 0 of 100 generated inputs ran to the
+        end"): the stub of xQueueReceive fills the received message with the loop frame's bytes (96 on x86
+        against 48 on ARM); with a negative message ID the task calls through the message's callback pointer
+        (call dword ptr [ebp - 0x24]), with another it reads through its timer pointer (cmp dword ptr
+        [edi + 0x14], 0), and every input faults. ARM's GCC build gets 30 loop cases through the
+        compare-guided stage, which sets the ID with a fill entry ([7, 0, 0, 4, 0]: the 7th stub call's
+        first pointer, offset 0, 4 bytes, 0); on x86 the ID is compared as a memory operand (cmp dword ptr
+        [ebp - 0x28], 0), and no fill entry comes of it. Side finding: a function whose cases have no
+        arguments (cdecl, a parameter it never reads: every FreeRTOS task) gets the same fill bytes in every
+        input, since the fills' seed is the case's arguments; seeding them with the stub answers too changed
+        none of the four loop functions the GCC build drops (tried 2026-10-27, not kept).
       - [ ] Cases whose original runs into the limit: vGalileoLegacyGPIOInitializationForLED on the -O2
         build failed 26 of 47 ("original: ... did not return within 200000 instructions"), while dread
         trace runs the same cases to the end in both images: the generator's runs and the runner's
