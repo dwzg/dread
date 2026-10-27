@@ -35,6 +35,17 @@ def test_a_callee_s_fields_are_copied_onto_its_caller_s_memory():
     assert fields(s, "caller") == {(4, 4), (8, 4)}
 
 
+def test_an_address_in_an_integer_cast_is_the_address():
+    """x86's lifter writes an access's address inside a cast to an integer, *(volatile u32 *)((u32)(eax +
+    0x10u)), and the sum in the cast was taken for arithmetic: no x86 pointer got a field (the IA32 demo's
+    uxListRemove had no structure, where ARM's has one of three fields). The cast is the address."""
+    s = analysed("u32 unlink(u32 eax_in, u32 sa0)\n{\n"
+                 "    u32 ebx = *(volatile u32 *)((u32)(sa0 + 4u));\n"
+                 "    *(volatile u32 *)((u32)(sa0 + 0x10u)) = 0u;\n"
+                 "    return ebx + *(volatile u32 *)((u32)(sa0 + 8u));\n}\n")
+    assert fields(s, "unlink", 1) == {(4, 4), (8, 4), (16, 4)}
+
+
 def test_two_callers_of_one_helper_keep_their_structures_apart():
     s = analysed("u32 clear(u32 r0)\n{\n    *(volatile u32 *)r0 = 0u;\n    return r0;\n}\n"
                  "u32 a(u32 r0)\n{\n    *(volatile u8 *)(r0 + 12) = 1;\n    clear(r0);\n    return 0;\n}\n"

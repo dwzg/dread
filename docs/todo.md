@@ -6645,11 +6645,14 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         reached 4 instructions no other case reaches, and its old readable C had agreed with it by
         chance. ARM GCC -Os: the 12 functions with stack arguments, raw 115 -> 99, every function
         readable as before. tests/test_tidy.py: sa0 and sa1 (whose address goes to a callee: kept).
-      - [ ] x86's pointers become word arrays, not structures: uxListRemove's sa0 is volatile u32 * with
-        sa0[1], sa0[2], sa0[4], where ARM's r0 is a struct s_15 * with r0->f_4, f_8, f_10 (x86 GCC -Os: 27
-        structures in 27 functions, 186 members; ARM: 50 in 119, 1040). Find which evidence dread.shapes
-        takes on ARM that x86's code does not give (the callers' arguments: x86 passes them through the
-        outgoing stack slots).
+      - [x] x86's pointers became word arrays, not structures: uxListRemove's sa0 was volatile u32 * with
+        sa0[1], sa0[2], sa0[4], where ARM's r0 is a struct s_15 * with r0->f_4, f_8, f_10. The cause
+        (2026-10-27): x86's lifter writes an access's address inside an integer cast, *(volatile u32 *)((u32)
+        (eax + 0x10u)), and dread.shapes took the sum in the cast for arithmetic (_access, address), so no
+        x86 pointer got a field. The cast is the address now. x86 GCC -Os on a copy (readable check and
+        figures, with the stack parameters): structures 27 -> 39 (in 27 -> 72 functions), typed variables
+        69 -> 203, members 186 -> 573, raw accesses 232 -> 86; ARM GCC -Os unchanged in every figure.
+        tests/test_shapes.py: unlink's three fields.
       - [ ] The register parameter a regparm(1) function keeps (u32 uxListRemove(u32 eax_in, ...)): the
         lifter hands eax in where regflow says the function reads it at its entry, and the readable C keeps
         the parameter where the body never reads it, since dropping it would move the first stack

@@ -406,6 +406,8 @@ def _access(e):
         if not m:
             return None
         a = e.e.e
+        while isinstance(a, C.Cast) and " ".join(a.type.split()) in ("u32", "s32"):
+            a = a.e                         # (x86's lifter writes *(volatile u32 *)((u32)(ebx + 0x38u)))
         if isinstance(a, C.Binary) and a.op in ("+", "-") and isinstance(a.r, C.Num) and isinstance(a.r.value, int):
             return a.l, signed32(a.r.value if a.op == "+" else -a.r.value), m.group(1)
         return a, 0, m.group(1)
@@ -685,6 +687,11 @@ class Collector:
         x = e.e if isinstance(e, C.Cast) and " ".join(e.type.split()) in ("u32", "s32") else e
         if isinstance(x, C.Unary) and x.op == "&" and isinstance(x.e, C.Name) and x.e.id in self.arg_offset:
             return (self.args, self.arg_offset[x.e.id])     # (a parameter's word in the argument area)
+        if x is not e:
+            # an address in an integer cast is the address: x86's lifter writes (u32)(sa0 + 0x10u), and
+            # the sum inside the cast was taken for arithmetic, which gave no x86 pointer a field (the
+            # GCC -Os bench build's uxListRemove: no structure, where ARM's has one of three fields)
+            return self.address(x)
         if isinstance(e, C.Binary) and e.op in ("+", "-") and isinstance(e.r, C.Num) and isinstance(e.r.value, int):
             if e.op == "+" and self.s.static_offset(e.r.value):
                 self.value(e.l)             # (an index into static data: the value is no pointer)
