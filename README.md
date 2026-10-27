@@ -34,7 +34,7 @@ is safe to run on hardware.
 
 <!-- status: written by bin/dread status from docs/todo.md, the gizmo builds' tables and the bench recipe; do not edit by hand -->
 
-38 commands, 1,177 test functions run by CI on every push, 42 FreeRTOS builds in the benchmark on 4 architectures (`dread bench`). What each part does: [docs/features.md](docs/features.md); what comes next: [docs/todo.md](docs/todo.md).
+38 commands, 1,178 test functions run by CI on every push, 42 FreeRTOS builds in the benchmark on 4 architectures (`dread bench`). What each part does: [docs/features.md](docs/features.md); what comes next: [docs/todo.md](docs/todo.md).
 
 | Architecture | Gizmo builds: lifted / functions | FreeRTOS builds | Progress |
 |---|---|---|---|
