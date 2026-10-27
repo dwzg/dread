@@ -168,13 +168,17 @@ def test_gizmo_i386_lifts():
     hands it back (uart_init: one store), GCC's pop eax that takes an argument off again is no read of it
     (print_status), and uart_puts reads edx behind uart_putc, whose code leaves it (GCC's interprocedural
     register allocation): uart_putc's C keeps edx (-fcall-saved-edx), and the call does not clear it."""
-    from dread import lift, regflow
+    from dread import lift, lift_x86, regflow
     from dread.program import Program
     from dread.target import Target
     lifted, refused = lift_gizmo("i386")
-    assert set(refused) == {"_start", "main"}, refused
+    musttail = Target.load(gizmo_dir("i386")).compiler.accepts(lift_x86.MUSTTAIL)    # (GCC 15 and later)
+    assert set(refused) == {"_start", "main"} | (set() if musttail else {"dispatch"}), refused
     assert "switch (index) {" in lifted["script_run"].text
-    assert "__attribute__((musttail)) return ((u32 (*)(u32))(s0))(eax);" in lifted["dispatch"].text
+    if musttail:
+        assert "__attribute__((musttail)) return ((u32 (*)(u32))(s0))(eax);" in lifted["dispatch"].text
+    else:
+        assert "has no musttail" in refused["dispatch"], refused
     target = Target.load(gizmo_dir("i386"))
     program = Program(target)
     lifter = lift.make_lifter(program, regflow.load(target, target.image(), program))
@@ -204,7 +208,9 @@ def i386_copy(tmp_path):
         here = os.path.join(gizmo_dir("i386"), "build", cache)
         if os.path.isdir(here):
             shutil.copytree(here, copy / "i386" / "build" / cache)
-    os.remove(copy / "i386" / "src" / "rewritten.c")
+    for name in os.listdir(copy / "i386" / "src"):         # (rewritten.c, uart_putc.c: nothing by hand)
+        if name.endswith(".c"):
+            os.remove(copy / "i386" / "src" / name)
     return Target.load(str(copy / "i386"))
 
 
@@ -225,15 +231,16 @@ def test_gizmo_i386_lift_check_accepts_what_agrees_and_drops_a_mistake(tmp_path,
     from dread import build, lift, lift_x86
     target = i386_copy(tmp_path)
     image = target.image()
+    names = [n for n in I386_NAMES if n != "dispatch" or target.compiler.accepts(lift_x86.MUSTTAIL)]
     lines = []
-    accepted = lift.check(target, image, I386_NAMES, out=lines.append, jobs=4)
-    assert sorted(accepted) == sorted(I386_NAMES), lines
-    assert build.read_names(image.table("lifted")) == sorted(I386_NAMES)
+    accepted = lift.check(target, image, names, out=lines.append, jobs=4)
+    assert sorted(accepted) == sorted(names), lines
+    assert build.read_names(image.table("lifted")) == sorted(names)
     monkeypatch.setitem(lift_x86.CONDITIONS, "e", "!zf")
     lines = []
-    accepted = lift.check(target, image, I386_NAMES, out=lines.append, jobs=4)
+    accepted = lift.check(target, image, names, out=lines.append, jobs=4)
     dropped = [line.split()[2] for line in lines if line.startswith("dropped  FAIL")]
-    assert dropped and set(accepted) | set(dropped) == set(I386_NAMES), lines
+    assert dropped and set(accepted) | set(dropped) == set(names), lines
 
 
 def test_a_stubbed_callee_logs_its_stack_arguments(tmp_path, monkeypatch):
@@ -319,8 +326,8 @@ def test_the_x86_c_takes_eax_in_eax(tmp_path):
 
 
 def test_gizmo_i386_readable_c_passes_its_gate(tmp_path):
-    """dread readable on gizmo-i386: the types pass writes read_line's head anew (its eax a signed value:
-    uart_getc returns -1 for nothing), eax still first. The C takes eax in eax because dread.build compiles
+    """dread readable on gizmo-i386: the types pass writes read_line's head anew where the cases take it
+    (its eax a signed value: uart_getc returns -1 for nothing; GCC 13 kept u32), eax still first. The C takes eax in eax because dread.build compiles
     it with -mregparm=1 (its REGPARM line); an attribute in the head's text was lost there, and every
     argument was read a word off. The readable C of these functions passes the cases their lifted C passed."""
     if not _compiles("i386", tmp_path):
@@ -337,4 +344,5 @@ def test_gizmo_i386_readable_c_passes_its_gate(tmp_path):
     assert readable.main(["--target", str(tmp_path / "gizmo" / "i386"), "--out", str(out), "read_line"]) == 0
     import re
     head = re.search(r"^\w+ read_line\((\w+) (\w+), u32 sa0, u32 sa1\)$", (out / "read_line.c").read_text(), re.M)
-    assert head and head.group(1) == "s32" and head.group(2).startswith("eax"), head
+    # (the types pass gives eax another type where the cases take it: s32 with GCC 15, u32 kept with 13)
+    assert head and head.group(1) in ("s32", "u32") and head.group(2).startswith("eax"), head

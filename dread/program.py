@@ -247,9 +247,11 @@ class Program:
             if isa == "a32":
                 n = 4
             else:
-                try:            # (x86 needs up to max_insn bytes to tell a length; the others two)
-                    n = self.arch.insn_length(self.read(a, min(getattr(self.arch, "max_insn", 2), max(end - a, 2))),
-                                              isa)
+                try:            # (x86 needs up to max_insn bytes to tell a length; the others two; at
+                    # most what the range has left: a one-byte ret that ends the image, whose ELF
+                    # Ubuntu's linker ends right there, read a byte past it)
+                    n = self.arch.insn_length(self.read(a, min(getattr(self.arch, "max_insn", 2),
+                                                               max(end - a, step))), isa)
                 except TargetError:
                     raise TargetError("code range %s-%s lies outside the image" % (h(start), h(end)))
             self.code[a] = (n, isa)

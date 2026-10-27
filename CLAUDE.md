@@ -86,6 +86,13 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   compiles code meets three compilers that way (on 2026-10-24 a new test passed on the host and on
   22.04 and failed on CI's 24.04, whose RISC-V GCC made a branch where the others made a select).
   The container sees only /tmp, the checkout and the bench: pytest's `--basetemp` goes under /tmp.
+  The x86 tests compile with the host's `gcc -m32`, which `bin/with-toolchain` does not put in
+  front: `bin/ci-container [PYTEST ARGUMENTS...]` runs the tests in a copy of the tree, without the
+  examples' caches as on CI, in an image like CI's runner (ci/ubuntu-24.04.containerfile: GCC 13
+  with -m32, clang 18, the workflow's cross compilers). On 2026-10-27 three x86 steps went out while
+  CI's run of the first was still going; it failed (a register GCC 13 set where GCC 15 did not, an
+  image Ubuntu's linker ended at its last byte), and main stayed red until the fix: run what a
+  change touches in the container before pushing, and watch a push's run before the next push.
 - **Stay polite on the machine**: long runs go to the background (polite, as the tools are);
   nothing that fills memory or runs without a bound.
 - **Beside a long run**: a bench measurement starts every step anew from the tree it runs from, so

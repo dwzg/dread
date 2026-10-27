@@ -6440,7 +6440,9 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
     (__attribute__((musttail)) return), with eax alone for GCC, which then writes no argument word: the
     handlers find their arguments in the caller's words, as the original's do, and the lift check
     accepts dispatch. clang's musttail takes the caller's signature, so there the arguments go along,
-    each written back into its own slot (where a callee would not write them, the cases see it).
+    each written back into its own slot (where a callee would not write them, the cases see it). GCC
+    takes musttail since 15: with an older one (CI's GCC 13 failed the lift check's whole build on it)
+    the tail call is refused, as dread.target's Compiler.accepts finds.
     dread.cparse reads a statement attribute in front of a return, and void_results leaves such a
     return whole.
   - [x] script_run on i386 (both builds, 2026-10-27, generator VERSION 36): the generated cases missed an

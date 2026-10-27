@@ -70,6 +70,7 @@ CONDITIONS = {"o": "of", "no": "!of", "b": "cf", "ae": "!cf", "e": "zf", "ne": "
 JUMPS = {"j" + c: c for c in CONDITIONS}
 SETS = {"set" + c: c for c in CONDITIONS}
 MOVES = {"cmov" + c: c for c in CONDITIONS}
+MUSTTAIL = "typedef unsigned (*f_)(unsigned);\nunsigned g_(f_ p, unsigned x) { __attribute__((musttail)) return p(x); }\n"
 NOPS = ("nop", "cld", "endbr32", "pause")   # cld: the direction flag is clear at every call (the ABI)
 ARITH = ("add", "adc", "sub", "sbb", "cmp", "and", "or", "xor", "test")
 SHIFTS = ("shl", "sal", "shr", "sar", "rol", "ror")
@@ -1042,7 +1043,11 @@ class X86Lifter(lift.Lifter):
                 and switches.pointer_tail(self.prog, fn, a):
             # A tail call the compiler must make a jump (musttail), with the stack arguments where they
             # lie: GCC's with eax alone, which writes no argument word; clang's musttail takes the
-            # caller's signature, so ours go along, each written back into its own slot.
+            # caller's signature, so ours go along, each written back into its own slot. A compiler
+            # without musttail (GCC before 15) makes no promise: refused.
+            if not self.prog.target.compiler.accepts(MUSTTAIL):
+                raise Refused("0x%x jumps through a pointer, and the compiler has no musttail (GCC 15 and later, "
+                              "clang) to make the C's call of it a jump" % a)
             words = []
             if self.prog.target.compiler.kind == "clang":
                 words = [self._load(self._slot(-4 - 4 * k), 4) for k in range(self.ctx["stack_params"])]

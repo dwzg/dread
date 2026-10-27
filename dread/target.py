@@ -219,6 +219,7 @@ class Abi:
 
 
 _LINKER_HELP = {}
+_ACCEPTS = {}
 
 
 def linker_knows(command, option):
@@ -347,6 +348,29 @@ class Compiler:
     def tool(self, name):
         """The program of one tool, as one string (a GNU toolchain's name; for clang, the first word)."""
         return self.command("cc" if name == "gcc" else name)[0]
+
+    def accepts(self, code):
+        """Whether the compiler compiles this C with the target's flags and no warning (-Werror: an
+        attribute it ignores is one it does not take), asked once per compiler, flags and code in a
+        process; a compiler that cannot be run takes nothing. What a lifter may write depends on the
+        compiler's version: GCC takes __attribute__((musttail)) since 15, and CI's GCC 13 failed the
+        lift check's whole build on it."""
+        import os
+        import subprocess
+        import tempfile
+        key = (tuple(self.command("cc")), tuple(self.cflags), code)
+        if key not in _ACCEPTS:
+            with tempfile.TemporaryDirectory(prefix="dread-accepts-") as d:
+                src = os.path.join(d, "probe.c")
+                with open(src, "w") as f:
+                    f.write(code)
+                try:
+                    got = subprocess.run(self.command("cc") + self.cflags + ["-Werror", "-c", "-o",
+                                         os.path.join(d, "probe.o"), src], capture_output=True, text=True, timeout=120)
+                    _ACCEPTS[key] = got.returncode == 0
+                except (OSError, subprocess.SubprocessError):
+                    _ACCEPTS[key] = False
+        return _ACCEPTS[key]
 
 
 class Copy:

@@ -23,16 +23,25 @@ def run_all(target, payload, cases_dir=None, names=None):
 
 
 def src_copy(tmp_path, variant, replace=None):
-    """The target's src with rewritten.c inlined from examples/gizmo/rewritten, optionally edited."""
+    """The target's src with the shared rewritten.c (examples/gizmo/rewritten), optionally edited, inlined
+    into the build's own rewritten.c in place of its include, and the build's other sources: what dread
+    recon compiles (gizmo-i386 has uart_putc in a file of its own, which a copy of the shared file alone
+    left out, and the rewritten.c it then took for the build's rewrote it again without)."""
     src = tmp_path / "src"
     src.mkdir(parents=True)
-    shutil.copy(os.path.join(GIZMO, variant, "src", "addresses.h"), src)
+    for name in os.listdir(os.path.join(GIZMO, variant, "src")):      # (addresses.h, a build's own sources)
+        if name != "rewritten.c":
+            shutil.copy(os.path.join(GIZMO, variant, "src", name), src)
     with open(os.path.join(GIZMO, "rewritten", "rewritten.c")) as f:
         text = f.read()
     if replace:
         assert replace[0] in text
         text = text.replace(*replace)
-    (src / "rewritten.c").write_text('#include "addresses.h"\n' + text)
+    with open(os.path.join(GIZMO, variant, "src", "rewritten.c")) as f:
+        wrapper = f.read()
+    include = '#include "../../rewritten/rewritten.c"'
+    assert wrapper.count(include) == 1, variant
+    (src / "rewritten.c").write_text(wrapper.replace(include, text))
     return src
 
 
