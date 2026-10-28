@@ -95,6 +95,9 @@ REFUSED = {"std": "sets the direction flag",
            "pushal": "pushes every register", "popal": "pops every register", "enter": "makes a frame with enter"}
 
 
+PUSHAL = ("eax", "ecx", "edx", "ebx", "sp", "ebp", "esi", "edi")     # pushal's order, each a word further down
+
+
 def _mask(size):
     return MASKS[size]
 
@@ -163,8 +166,17 @@ class X86Lifter(lift.Lifter):
     def step(self, insn, depth, values):
         m, ops = insn.mnemonic, insn.operands
         after = dict(values)
-        if m in REFUSED and m in ("pushal", "popal", "enter"):
+        if m in REFUSED and m == "enter":
             raise Refused("0x%x %s" % (insn.address, REFUSED[m]))
+        if m == "pushal":                   # (an interrupt handler's saves: handler_kind; refused elsewhere, _insn)
+            for k, r in enumerate(PUSHAL):
+                self._put(after, depth + 4 * (k + 1), ("sp", depth) if r == "sp" else values.get(r))
+            return depth + 32, after
+        if m == "popal":                    # (the same back, esp's word skipped)
+            for k, r in enumerate(PUSHAL):
+                if r != "sp":
+                    self._put(after, r, values.get(depth - 28 + 4 * k))
+            return depth - 32, after
         if m == "push":
             if ops[0].size != 4:
                 raise Refused("0x%x pushes a word of %d bytes" % (insn.address, ops[0].size))
@@ -476,6 +488,10 @@ class X86Lifter(lift.Lifter):
         m, ops = insn.mnemonic, insn.operands
         kind, target, falls = self.arch.flow(insn)
         out = []
+        if m == "pushal":
+            return [(depth + 4 * (k + 1), 4, False, True) for k in range(len(PUSHAL))]
+        if m == "popal":
+            return [(depth - 28 + 4 * k, 4, True, False) for k, r in enumerate(PUSHAL) if r != "sp"]
         if m == "push":
             out.append((depth + 4, 4, False, True))
             if ops[0].type == X.X86_OP_MEM:
@@ -545,7 +561,7 @@ class X86Lifter(lift.Lifter):
     # ---- the frame's top (dread.lift's saves_out) ----
 
     def results(self, fn, handler=None):
-        return RESULTS[self._width(fn.name)]
+        return () if handler else RESULTS[self._width(fn.name)]
 
     def frame_effects(self, fn, insn, depth, values, results, own):
         """dread.lift.FrameEffects of an x86 instruction: its memory operands (a mov of a register or a
@@ -559,7 +575,16 @@ class X86Lifter(lift.Lifter):
         kind, target, falls = self.arch.flow(insn)
         whole_reg = lambda o: o.type == X.X86_OP_REG and LANES.get(insn.reg_name(o.reg), (0, 0))[1] == M32 \
             and self._reg(insn, o.reg) != "sp"
-        if m == "push":
+        if m == "pushal":                   # (an interrupt handler's saves, its popal's restores: saves_out)
+            for k, r in enumerate(PUSHAL):
+                fx.accesses.append(("sp", None, -4 * (k + 1), 4, "store", None, False))
+            fx.stored |= set(PUSHAL) - {"sp"}
+        elif m == "popal":
+            for k, r in enumerate(PUSHAL):
+                if r != "sp":
+                    fx.accesses.append(("sp", None, 28 - 4 * k, 4, "load", r, False))
+            fx.loaded |= set(PUSHAL) - {"sp"}
+        elif m == "push":
             plain = ops[0].type == X.X86_OP_IMM or whole_reg(ops[0])
             fx.accesses.append(("sp", None, -4, 4, "store" if plain else "other", None, False))
             if ops[0].type == X.X86_OP_REG:
@@ -657,7 +682,19 @@ class X86Lifter(lift.Lifter):
         return "i386"
 
     def handler_kind(self, fn):
-        return None
+        """"interrupt" when every return of fn is iret, an interrupt or exception handler the IDT enters,
+        else None. Its C is a function with the compilers' interrupt attribute (GCC 7 and later, clang),
+        which saves the registers it uses, those a callee may change around a call among them, and
+        returns with iret, so a pushal at its entry and a popal in front of each iret are its saves
+        (saves_out leaves them out) and it returns nothing. The system run alone tests it (system_only).
+        One that switches stacks (FreeRTOS's context switch: mov esp, [...]) or reads its interrupt frame
+        is refused as before; a function with ret and iret is no handler, and its iret is refused."""
+        key = getattr(fn, "key", fn.name)
+        if key not in self._handlers:
+            kinds = {("iret" if i.mnemonic in ("iret", "iretd") else "ret") for i in self.prog.instructions(fn)
+                     if i is not None and self.arch.flow(i)[0] == "return"}
+            self._handlers[key] = "interrupt" if kinds == {"iret"} else None
+        return self._handlers[key]
 
     def _check_returns(self, fn, states, handler=None):
         """ret at depth 0 (the return address on top)."""
@@ -979,6 +1016,11 @@ class X86Lifter(lift.Lifter):
             return self._int(insn)
         if m in ("in", "out"):
             return self._port(insn)
+        if self.ctx.get("handler"):         # (an interrupt handler: the attribute saves and returns with iret)
+            if m in ("pushal", "popal"):
+                return None
+            if m in ("iret", "iretd"):
+                return "return;"
         if m in REFUSED:
             raise Refused("0x%x %s" % (a, REFUSED[m]))
         if m in NOPS or self.arch.is_padding(insn):
@@ -1316,6 +1358,9 @@ class X86Lifter(lift.Lifter):
         return "{ %s }" % one
 
     def _ret(self):
+        if self.ctx.get("handler"):
+            raise Refused("an interrupt handler that leaves otherwise than by iret (a tail call, a switch's "
+                          "default)")
         if self._width(self.ctx["fn"].name) == 2:
             return "((u64)edx << 32) | eax"
         return "eax"
@@ -1570,10 +1615,17 @@ class X86Lifter(lift.Lifter):
             convention = "" if words[name] < 0 or nregs[name] == len(own) else \
                 " __attribute__((regparm(%d)))" % nregs[name]
             lines.append("extern %s %s(%s)%s;" % (CTYPES[width], name, params, convention))
-        written = self.written_words(body, ctx["stack_params"])
-        params = ["u32 %s_in" % r for r in own] + ["%su32 sa%d" % ("volatile " if k in written else "", k)
-                                                   for k in range(ctx["stack_params"])]
-        lines.append("%s %s(%s)" % (CTYPES[self._width(fn.name)], fn.name, ", ".join(params)))
+        if ctx.get("handler"):              # (the compiler writes the saves and the iret: handler_kind)
+            if ctx["stack_params"]:
+                raise Refused("an interrupt handler that reads its interrupt frame (the words above its "
+                              "return address)")
+            own = []
+            lines.append("__attribute__((interrupt)) void %s(void *frame_)" % fn.name)
+        else:
+            written = self.written_words(body, ctx["stack_params"])
+            params = ["u32 %s_in" % r for r in own] + ["%su32 sa%d" % ("volatile " if k in written else "", k)
+                                                       for k in range(ctx["stack_params"])]
+            lines.append("%s %s(%s)" % (CTYPES[self._width(fn.name)], fn.name, ", ".join(params)))
         lines.append("{")
         lines.append("    u32 %s;" % ", ".join("%s = %s" % (r, r + "_in" if r in own else "0") for r in REGS))
         lines.append("    u32 cf = 0, zf = 0, sf = 0, of = 0, s0 = 0, d0 = 0, e0 = 0, a0 = 0, k0 = 0;")
@@ -1588,7 +1640,8 @@ class X86Lifter(lift.Lifter):
             lines.append("    u8 frame[%d] __attribute__((aligned(4)));" % max(8, frame))
             lines.append("    u32 sp0 = (u32)&frame[%d];" % max(8, frame))
         lines.append("    %s (void)cf; (void)zf; (void)sf; (void)of; (void)s0; (void)d0; (void)e0; (void)a0; "
-                     "(void)k0; (void)sp0;" % " ".join("(void)%s;" % r for r in REGS))
+                     "(void)k0; (void)sp0;%s" % (" ".join("(void)%s;" % r for r in REGS),
+                                                 " (void)frame_;" if ctx.get("handler") else ""))
         lines += body
         lines.append("}")
         return "\n".join(lines) + "\n"

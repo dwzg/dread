@@ -6623,8 +6623,23 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         and pciIOread32 pass; an x86 string instruction no longer reads the flags (the direction flag
         alone, which the ABI keeps clear: rep movsl two calls up made inl hand its flags back; regflow
         VERSION 32). tests/test_x86.py: kbd polls a status port and reads the data port.
-      - [ ] Pushes of every register, iret (the port's assembly and the support code: refused, rightly for
-        now).
+      - [x] Pushes of every register, iret (the port's assembly and the support code: refused, rightly for
+        now). Since 2026-10-28 (dread.lift_x86 handler_kind, decisions.md): a function whose every return
+        is an iret is an interrupt handler, its C a function with the compilers' interrupt attribute (GCC
+        7 and later, clang: it saves what it uses, the registers a callee may change around a call among
+        them, emits cld before a call, and returns with iret), so a pushal at its entry and a popal in front
+        of each iret are its saves, which saves_out leaves out; it returns nothing and only the system run
+        tests it, as ARM's A-profile handlers. gizmo-i386's irq_entry (pushal; cld; call irq_dispatch;
+        popal; iret) is accepted by the system run on both builds (GCC's 30 + 1 lifted functions, clang's
+        31 + 1, beside the 13 written by hand). The port's four handlers that switch stacks (vPortYieldCall,
+        vPortTimerHandler, vPortCentralInterruptWrapper, vApplicationHPETTimer1Wrapper) are refused now
+        for what C cannot do: "loads the stack pointer from memory (a context switch?)"; the other two
+        (vPortAPICErrorHandlerWrapper, vPortAPICSpuriousHandler) lift and wait for a system run of the
+        IA32 target ("dropped: ... the target has no system-run scenarios"), the accepted counts as
+        before (257, 231, 236). pushal in a function that returns with ret stays refused: it keeps every
+        register for its caller, which no attribute writes for a plain function. tests/test_x86.py:
+        irq_entry through the lift check; the port's two shapes lifted and compiled, a stack switch and a
+        pushal with ret refused.
       - [x] dread.fragile saves_touched took an argument passed from a callee-saved register for a saved
         register (found and corrected 2026-10-27): vTaskSuspend passes uxListRemove its argument with push
         esi, and uxListRemove reading it (mov eax, [esp + 8]) was "a read of the saved esi; a length past

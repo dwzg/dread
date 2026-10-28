@@ -5609,3 +5609,18 @@ function built by GCC 11; GCC 13 and 16 keep the store, and so do arm-none-eabi-
   Conservative where the address escapes (a va_list's walk, an argument's address handed to a callee):
   others may write those words; with the host's GCC the IA32 builds' lift checks accept the same
   functions as without it. ARM's lifter stays as it is: its compilers keep the store.
+
+## An x86 interrupt handler becomes C with the interrupt attribute (2026-10-28)
+
+**Decided by recommendation.** A function whose every return is an iret (gizmo-i386's irq_entry:
+pushal; cld; call; popal; iret) was refused for its pushal.
+
+- **A naked function** with the original's pushal, popal and iret as inline assembly around a call of
+  the C body: the original's entry and exit kept exactly, but as text the C does not see, and every
+  compiler's naked rules on what a body may hold.
+- **Taken: the compilers' interrupt attribute** (GCC 7 and later, clang), as for ARM's A-profile
+  handlers: the compiler saves what the C uses, the registers a callee may change around a call among
+  them, emits cld before a call and returns with iret, so the pushal and the popal are saves that
+  saves_out leaves out. What differs from the original is the stack below the interrupted code's
+  stack pointer (fewer words saved, the stack realigned), which nothing reads. Only the system run
+  tests such a function. A handler that switches stacks or reads its interrupt frame stays refused.

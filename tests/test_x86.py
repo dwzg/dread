@@ -1841,7 +1841,8 @@ def lift_gizmo(variant):
 
 def test_gizmo_i386_lifts():
     """dread.lift_x86 on both i386 builds: every function but the startup and GCC's main (they set the
-    stack pointer and align it) and the interrupt entry (pushal, iret). A jump through a table is a switch (script_run; clang's dispatch, its
+    stack pointer and align it); the interrupt entry (pushal, iret) as an interrupt handler since
+    2026-10-28 (handler_kind). A jump through a table is a switch (script_run; clang's dispatch, its
     handlers inlined), GCC's dispatch a tail call through the pointer it loads, which the compiler must make a
     jump (musttail: its handlers take their arguments from dispatch's caller's words). Every function's C takes eax as it
     comes (compiled with -mregparm=1) and its arguments through their addresses; a void function that does not write eax
@@ -1853,7 +1854,8 @@ def test_gizmo_i386_lifts():
     from dread.target import Target
     lifted, refused = lift_gizmo("i386")
     musttail = Target.load(gizmo_dir("i386")).compiler.accepts(lift_x86.MUSTTAIL)    # (GCC 15 and later)
-    assert set(refused) == {"_start", "main", "irq_entry"} | (set() if musttail else {"dispatch"}), refused
+    assert set(refused) == {"_start", "main"} | (set() if musttail else {"dispatch"}), refused
+    assert "__attribute__((interrupt)) void irq_entry(void *frame_)" in lifted["irq_entry"].text
     assert "switch (index) {" in lifted["script_run"].text
     if musttail:
         assert "__attribute__((musttail)) return ((u32 (*)(u32))(s0))(eax);" in lifted["dispatch"].text
@@ -1878,7 +1880,8 @@ def test_gizmo_i386_lifts():
     assert "u32 eax = eax_in," in init and re.search(r"return eax;  /\* [0-9a-f]+: ret  \*/", init)
     assert "print_status" in lifted
     lifted, refused = lift_gizmo("i386clang")
-    assert set(refused) == {"_start", "irq_entry"}, refused
+    assert set(refused) == {"_start"}, refused
+    assert "__attribute__((interrupt)) void irq_entry(void *frame_)" in lifted["irq_entry"].text
     assert "switch (index) {" in lifted["dispatch"].text and "switch (index) {" in lifted["script_run"].text
 
 
@@ -1928,6 +1931,91 @@ def test_gizmo_i386_lift_check_accepts_what_agrees_and_drops_a_mistake(tmp_path,
     accepted = lift.check(target, image, names, out=lines.append, jobs=4)
     dropped = [line.split()[2] for line in lines if line.startswith("dropped  FAIL")]
     assert dropped and set(accepted) | set(dropped) == set(names), lines
+
+
+
+def test_gizmo_i386_s_interrupt_entry_is_lifted_with_the_interrupt_attribute(tmp_path):
+    """irq_entry (pushal; cld; call irq_dispatch; popal; iret), the IDT's gate for the interrupt
+    controller's line: an interrupt handler (dread.lift_x86 handler_kind, every return an iret), its C a
+    function with the compilers' interrupt attribute that saves what it uses and returns with iret, so
+    the pushal and the popal are its saves, left out with the frame's top (saves_out). The system run
+    alone tests it: the lift check accepts it by the scenarios, whose timer interrupts it serves."""
+    if not _compiles("i386", tmp_path):
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import build, lift
+    target = i386_copy(tmp_path)
+    image = target.image()
+    lines = []
+    assert lift.check(target, image, ["irq_entry"], out=lines.append, jobs=2) == ["irq_entry"], lines
+    assert any(line.startswith("accepted irq_entry") and "exception handler" in line for line in lines), lines
+    build.lift_sources(target, image, ["irq_entry"], str(tmp_path / "one"), quiet=True)
+    text = (tmp_path / "one" / "irq_entry.c").read_text()
+    assert "__attribute__((interrupt)) void irq_entry(void *frame_)" in text, text
+    assert "    return;  /*" in text and "frame[" in text and "pushal  */" in text, text
+
+
+HANDLERS_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+u32 cur;
+
+__attribute__((noinline)) void tick(void)
+{
+    sink[0]++;
+}
+
+__asm__(".text\n"
+        ".globl ack_irq\n.type ack_irq, @function\nack_irq:\n"
+        "    pushal\n    call tick\n    popal\n    movl $0, sink + 4\n    iret\n.size ack_irq, .-ack_irq\n"
+        ".globl spurious\n.type spurious, @function\nspurious:\n    iret\n.size spurious, .-spurious\n"
+        ".globl switcher\n.type switcher, @function\nswitcher:\n"
+        "    pushal\n    movl %esp, cur\n    call tick\n    movl cur, %esp\n    popal\n    iret\n"
+        ".size switcher, .-switcher\n"
+        ".globl saver\n.type saver, @function\nsaver:\n    pushal\n    call tick\n    popal\n    ret\n"
+        ".size saver, .-saver\n");
+
+void _start(void)
+{
+    tick();
+    for (;;)
+        ;
+}
+"""
+
+
+def test_interrupt_handlers_and_what_stays_refused(tmp_path):
+    """FreeRTOS's IA32 port has two handlers of this shape (vPortAPICErrorHandlerWrapper: pushal, a
+    call, popal, the end of interrupt written, iret; vPortAPICSpuriousHandler: iret alone): their C has
+    the interrupt attribute, the store behind the popal in its place, and compiles with the target's
+    compiler. Refused as before: a handler that switches stacks (the context switch: the stack pointer
+    stored and loaded again, which C cannot do), and pushal in a function that returns with ret (it
+    keeps every register for its caller, which no compiler's attribute writes for a plain function)."""
+    import subprocess
+    target = small_i386(tmp_path, HANDLERS_C, "handlers")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import build, lift, regflow
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+
+    def lifted(name):
+        return build.lifted_result(lifter, program.by_name[name]).text
+    ack, spurious = lifted("ack_irq"), lifted("spurious")
+    assert "__attribute__((interrupt)) void ack_irq(void *frame_)" in ack, ack
+    assert "__attribute__((interrupt)) void spurious(void *frame_)" in spurious, spurious
+    body = ack.split("{", 1)[1]
+    assert body.index("tick(") < body.index("= (u32)(0x0u);") < body.index("return;"), ack
+    include = os.path.join(os.path.dirname(lift.__file__), "include")
+    for name, text in (("ack_irq", ack), ("spurious", spurious)):
+        c = tmp_path / ("%s.c" % name)
+        c.write_text(text)
+        subprocess.run(["gcc"] + SMALL_FLAGS + ["-mregparm=1", "-I", include, "-c", "-o", str(tmp_path / ("%s.o" % name)),
+                        str(c)], check=True)
+    for name in ("switcher", "saver"):
+        with pytest.raises(lift.Refused):
+            lifted(name)
 
 
 def test_a_stubbed_callee_logs_its_stack_arguments(tmp_path):
