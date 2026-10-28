@@ -224,7 +224,10 @@ to mtvec, mret runs in the emulator), `regs` (registers answering configured wor
 is stored: identification registers, a PCI configuration space with its devices' base addresses),
 `pit` (a PC's 8254 at ports 0x40 to 0x43 and the system control port 0x61: counters in modes 0 and 1
 against the shared clock, counter 2's gate and output, as a firmware times a delay with them; models
-of x86's port space own `ports` and answer port_read and port_write). A model names the registers whose reads are plain (`plain`, as
+of x86's port space own `ports` and answer port_read and port_write), `pci` (a PCI configuration
+space: regs words in memory and through the ports 0xcf8 and 0xcfc), `hpet` (a PC's HPET: its
+identification, the main counter from the shared clock, one-shot and periodic timers raising lines,
+legacy routing to lines 2 and 8). A model names the registers whose reads are plain (`plain`, as
 `dread.models` describes it: no side effect, a value only a call into the models changes); the
 system run then does repeated reads of them without asking the model (in C on Unicorn). Likewise
 the registers whose writes are idempotent (`idempotent`: a write made again with the same size and

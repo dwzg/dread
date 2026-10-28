@@ -2332,3 +2332,77 @@ def test_the_pits_counter_two_times_a_delay():
     assert pit.port_read(0x61, 1) & 0x20 == 0x20
     pit.port_write(0x61, 1, 0x0e)
     assert pit.port_read(0x61, 1) & 0x0f == 0x0e
+
+
+def test_a_pci_configuration_space_by_memory_and_by_ports():
+    """dread.models.pci: a regs model's words read and written in memory (bus << 20 | device << 15 |
+    function << 12 | register) and through the ports 0xcf8 (the address, bit 31 set) and 0xcfc (the
+    word, a byte or a halfword of it): FreeRTOS's IA32 demo reads its UART's base address in memory and
+    the legacy bridge's GPIO base through the ports (0x8000f844). An address without bit 31 reads all
+    ones and takes no write."""
+    from dread.models import create
+    pci = create(None, "pci", {"kind": "pci", "base": 0xe0000000, "size": 0x100000, "default": 0xffffffff,
+                               "words": {"0xa5010": 0x9000b000, "0xf8044": 0x80001080}}, ".")
+    assert pci.ports == [(0xcf8, 0xd00)] and pci.read(0xe00a5010, 4) == 0x9000b000
+    pci.port_write(0xcf8, 4, 0x8000f844)
+    assert pci.port_read(0xcf8, 4) == 0x8000f844 and pci.port_read(0xcfc, 4) == 0x80001080
+    assert pci.port_read(0xcfe, 2) == 0x8000
+    pci.port_write(0xcfc, 2, 0x10c0)
+    assert pci.read(0xe00f8044, 4) == 0x800010c0
+    pci.port_write(0xcf8, 4, 0x0000f844)
+    assert pci.port_read(0xcfc, 4) == 0xffffffff
+    pci.port_write(0xcfc, 4, 0)
+    assert pci.read(0xe00f8044, 4) == 0x800010c0
+    assert create(None, "p", {"kind": "pci", "base": 0, "size": 0x1000, "ports": False}, ".").ports == []
+
+
+def test_the_hpets_counter_and_timers():
+    """dread.models.hpet: the identification FreeRTOS's IA32 demo checks (vendor 0x8086, else an
+    assertion in HPET.c), the main counter that runs with the shared clock while enabled, timer 0 set
+    up as the demo does it (bit 6 before each half of the comparator, then enabled, 32 bits, route 2,
+    legacy routing on) firing once on line 2 as a pulse, and timer 1 periodic and level-triggered: the
+    comparator, then the period written, its line held until the status is cleared."""
+    from dread.models import create
+
+    class System:
+        clock = 0
+
+        def __init__(self):
+            self.lines = []
+
+        def interrupt_level(self, line, level):
+            self.lines.append((self.clock, line, level))
+
+        def interrupts_changed(self):
+            pass
+    system = System()
+    hpet = create(system, "hpet", {"kind": "hpet", "base": 0xfed00000, "timers": 3, "rate": 4}, ".")
+    assert hpet.read(0xfed00000, 4) >> 16 == 0x8086 and hpet.read(0xfed00000, 4) >> 8 & 0x1f == 2
+    assert hpet.read(0xfed00004, 4) == 69841279
+    for address, value in ((0xfed00010, 0), (0xfed000f0, 0), (0xfed000f4, 0), (0xfed00100, 0x40),
+                           (0xfed00108, 1000), (0xfed00100, 0x40), (0xfed0010c, 0), (0xfed00100, 0x544)):
+        hpet.write(address, 4, value)
+    assert hpet.next_event() is None                    # (the counter does not run yet)
+    system.clock = 100
+    hpet.write(0xfed00010, 4, 3)
+    assert hpet.next_event() == 100 + 1000 * 4
+    system.clock = 100 + 10 * 4
+    assert hpet.read(0xfed000f0, 4) == 10
+    system.clock = 100 + 1000 * 4
+    hpet.event(system.clock)
+    assert system.lines == [(4100, 2, True), (4100, 2, False)] and hpet.next_event() is None
+    hpet.write(0xfed00120, 4, 0x14e)                    # (timer 1: level, enabled, periodic, bit 6, 32 bits)
+    hpet.write(0xfed00128, 4, 1050)                     # (the comparator)
+    hpet.write(0xfed00128, 4, 30)                       # (the period)
+    assert hpet.read(0xfed00128, 4) == 1050 and hpet.next_event() == 100 + 1050 * 4
+    system.lines.clear()
+    system.clock = 100 + 1050 * 4
+    hpet.event(system.clock)
+    assert system.lines == [(4300, 8, True)] and hpet.read(0xfed00020, 4) == 2   # (legacy: timer 1 on line 8)
+    assert hpet.next_event() == 100 + 1080 * 4
+    hpet.write(0xfed00020, 4, 2)
+    assert system.lines[-1] == (4300, 8, False) and hpet.read(0xfed00020, 4) == 0
+    system.clock = 100 + 2000 * 4
+    hpet.write(0xfed00010, 4, 2)                        # (stopped: the counter stands)
+    system.clock += 400
+    assert hpet.read(0xfed000f0, 4) == 2000 and hpet.next_event() is None

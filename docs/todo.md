@@ -6922,6 +6922,9 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
             as 0 (vendor 0x8086 expected). On the way it reads the legacy bridge's GPIO base through the
             configuration ports (out 0xcf8 0x8000f844, in 0xcfc), gets 0, and its GPIO accesses land on
             ports 0x0 to 0x44, one of them the PIT's 0x40.
+          - [x] The configuration ports (dread.models.pci, 2026-10-28): a regs model's words also
+            through 0xcf8 and 0xcfc (configuration mechanism 1); the legacy bridge's GPIO base
+            (0xf8044: 0x80001080) puts the GPIO's ports at 0x1080 and up.
           - [ ] A run whose first memory access goes to a device logs it twice (found 2026-10-28 on
             small i386 programs, on main as well): movl $0xa5, %eax; movl %eax, 0x40000000 at the entry
             gives two writes, the second one done by the C hook after Python's _io had registered the
@@ -6930,8 +6933,16 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
             accesses are too, also with stops between (scenario input events halt the run: a loop's
             forty stores stay forty). Both images alike, so no comparison saw it; the FreeRTOS demos'
             first accesses are RAM's. Not traced into Unicorn yet.
-          - [ ] The HPET (0xfed00000): the main counter from the shared clock, timer 0's comparator and
-            its interrupt (routed to the I/O APIC's input 2).
+          - [x] The HPET (0xfed00000): the main counter from the shared clock, timer 0's comparator and
+            its interrupt (routed to the I/O APIC's input 2). dread.models.hpet (2026-10-28): the
+            identification (vendor 0x8086, timers, period), the counter while enabled, one-shot and
+            periodic timers (the comparator, then the period), 32-bit mode, edge pulses and held levels
+            with the status, legacy routing. The demo passes its checks, sets up timers 0 to 2, starts
+            the counter, and then reads the I2C controller's BAR0 (0xe00aa010: device 21, function 2)
+            as all ones and faults on memory at 0xffffffff.
+          - [ ] The I2C controller (the Quark's DesignWare one at device 21, function 2: its BAR0) and
+            the port expander behind it (the Galileo Gen 2's LEDs): enable and its status, transfers
+            with stop detect, the receive FIFO's level, a register file for the device.
           - [ ] The local APIC (0xfee00000: its timer, which the calibration reads and FreeRTOS's tick
             uses, end of interrupt, the error and spurious vectors) and the I/O APIC (0xfec00000: the
             redirection the demo writes), delivering vectors through the IDT.
