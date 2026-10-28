@@ -87,3 +87,20 @@ def test_the_section_needs_its_markers():
     except ValueError:
         return
     raise AssertionError("a README without markers was taken")
+
+
+def test_a_lifted_table_git_does_not_track_is_not_counted(tmp_path):
+    """The section counts a gizmo build's lifted functions from config/lifted.txt, but only one git
+    tracks (or has staged): a lift check run by hand leaves an untracked table behind, which made the
+    section say 31 / 47 for a build the repository keeps no table of (2026-10-28). Outside a git
+    checkout the files there count."""
+    import subprocess
+    config = tmp_path / "examples" / "gizmo" / "x" / "config"
+    config.mkdir(parents=True)
+    (config / "functions.tsv").write_text("address\tname\tsize\n0x10\ta\t4\n0x14\tb\t4\n0x18\tc\t4\n")
+    (config / "lifted.txt").write_text("a\nb\n")
+    assert status.gizmo_figures(str(tmp_path), "x") == (3, 2)          # (no git checkout)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    assert status.gizmo_figures(str(tmp_path), "x") == (3, None)       # (untracked)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "examples/gizmo/x/config/lifted.txt"], check=True)
+    assert status.gizmo_figures(str(tmp_path), "x") == (3, 2)          # (staged)

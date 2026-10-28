@@ -7156,7 +7156,10 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   docs/todo.md's checkboxes, the gizmo builds' tables, the bench recipe, the commands and the tests'
   count, between two markers right below the introduction; tests/test_status.py fails on a stale one.
   The README cleaned up with it: the old status table's descriptions in docs/features.md, the commands
-  and setting up in docs/usage.md, the browser view in docs/gui.md (docs/decisions.md).
+  and setting up in docs/usage.md, the browser view in docs/gui.md (docs/decisions.md). Since
+  2026-10-28 a gizmo build's lifted table counts only where git tracks it (dread.status tracked): a
+  lift check run by hand had left gizmo-i386's untracked table behind, the section said 31 / 47, the
+  commit kept that, and the suite, run without the file, refused it.
 - [ ] A tutorial that takes gizmo from ELF to a rewritten, tested function, step by step.
 - [ ] A reference page per tool (from the docstrings, checked by a test that every command has one).
 - [ ] `pip install` from the repository works in a clean environment; version and changelog.

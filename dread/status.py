@@ -182,11 +182,32 @@ def count_lines(path, skip_comments=True, header=0):
     return max(0, len(rows) - header)
 
 
+def tracked(root, path):
+    """Whether git tracks path in the checkout at root (a staged file counts); True where root is no
+    git checkout (a release's files are what it has). The section describes what a commit records,
+    and a table a local run left behind untracked is no part of it: on 2026-10-28 a lift check run by
+    hand on gizmo-i386, whose lifted table the repository does not keep, made the section say 31 / 47,
+    the commit kept that, and the suite, run without the file, refused it."""
+    import subprocess
+    try:
+        known = subprocess.run(["git", "-C", root, "ls-files", "--error-unmatch", "--", os.path.relpath(path, root)],
+                               capture_output=True)
+        if known.returncode == 0:
+            return True
+        inside = subprocess.run(["git", "-C", root, "rev-parse", "--is-inside-work-tree"], capture_output=True,
+                                text=True)
+    except OSError:
+        return True
+    return inside.returncode != 0 or inside.stdout.strip() != "true"
+
+
 def gizmo_figures(root, build):
-    """(functions, lifted) of a gizmo build's tables (lifted None without config/lifted.txt)."""
+    """(functions, lifted) of a gizmo build's tables (lifted None without config/lifted.txt, or with
+    one git does not track: tracked)."""
     config = os.path.join(root, "examples", "gizmo", build, "config")
+    lifted = os.path.join(config, "lifted.txt")
     return (count_lines(os.path.join(config, "functions.tsv"), header=1) or 0,
-            count_lines(os.path.join(config, "lifted.txt")))
+            count_lines(lifted) if os.path.exists(lifted) and tracked(root, lifted) else None)
 
 
 def bench_builds(root):
