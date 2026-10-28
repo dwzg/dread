@@ -88,9 +88,9 @@ def without(ranges, holes):
 
 
 def classes():
-    from dread.models import clint, gpio, intc, nvic, timer, uart
+    from dread.models import clint, gpio, intc, nvic, regs, timer, uart
     return {"uart": uart.Uart, "timer": timer.Timer, "intc": intc.Intc, "nvic": nvic.Nvic, "gpio": gpio.Gpio,
-            "clint": clint.Clint}
+            "clint": clint.Clint, "regs": regs.Regs}
 
 
 def create(system, name, config, root):

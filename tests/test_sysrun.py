@@ -2244,3 +2244,24 @@ def test_the_record_of_a_scenario(target):
         assert kept["differ"] is None and kept["built"] > 0 and kept["runs"][1]["digest"] != kept["runs"][0]["digest"]
     finally:
         os.remove(os.path.join(sysrun.record_dir(target, image), "boot.json"))
+
+
+def test_registers_that_answer_configured_words():
+    """dread.models.regs: a range of registers answering configured 32-bit words (a PCI configuration
+    space: FreeRTOS's IA32 demo reads its UART's base address at 0xe00a5010), every other word the
+    default (0xffffffff: no device), reads of one, two or four bytes taking those bytes, stores kept
+    and read back, a narrow one keeping the word's other bytes; all of it plain and idempotent."""
+    import pytest
+    from dread.models import create
+    pci = create(None, "pci", {"kind": "regs", "base": 0xe0000000, "size": 0x100000, "default": 0xffffffff,
+                               "words": {"0xa5010": 0x9000b000, "0xaa000": 0x09348086}}, ".")
+    assert pci.ranges == pci.plain == pci.idempotent == [(0xe0000000, 0xe0100000)]
+    assert pci.read(0xe00a5010, 4) == 0x9000b000
+    assert pci.read(0xe00aa000, 2) == 0x8086 and pci.read(0xe00aa002, 2) == 0x0934 and pci.read(0xe00aa003, 1) == 0x09
+    assert pci.read(0xe0000000, 4) == 0xffffffff and pci.read(0xe0000002, 2) == 0xffff
+    pci.write(0xe0000004, 4, 0x00000006)
+    pci.write(0xe0000005, 1, 0x01)
+    assert pci.read(0xe0000004, 4) == 0x00000106
+    assert pci.read(0xe00a5012, 4) == 0xffff9000         # (across two words: the next one's default)
+    with pytest.raises(ValueError, match="4-aligned"):
+        create(None, "bad", {"kind": "regs", "base": 0, "size": 0x10, "words": {"0x2": 1}}, ".")
