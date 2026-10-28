@@ -6925,14 +6925,20 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
           - [x] The configuration ports (dread.models.pci, 2026-10-28): a regs model's words also
             through 0xcf8 and 0xcfc (configuration mechanism 1); the legacy bridge's GPIO base
             (0xf8044: 0x80001080) puts the GPIO's ports at 0x1080 and up.
-          - [ ] A run whose first memory access goes to a device logs it twice (found 2026-10-28 on
+          - [x] A run whose first memory access goes to a device logs it twice (found 2026-10-28 on
             small i386 programs, on main as well): movl $0xa5, %eax; movl %eax, 0x40000000 at the entry
-            gives two writes, the second one done by the C hook after Python's _io had registered the
-            register, so the instruction ran twice without any stop of the run; with a RAM access in
-            front of it in the same block (incl 0x20000000) the store is logged once, and later device
-            accesses are too, also with stops between (scenario input events halt the run: a loop's
-            forty stores stay forty). Both images alike, so no comparison saw it; the FreeRTOS demos'
-            first accesses are RAM's. Not traced into Unicorn yet.
+            gave two writes. Unicorn's: the store ran twice, with or without the C hook, and on a bare
+            unicorn.Uc mapped as the run maps the target. Unicorn 2.1.4 gives a new RAM block the offset
+            behind the last block it remembers while none has been freed, and does not remember a block
+            larger than a page that it sorts in front of a smaller one (qemu/exec.c,
+            find_ram_offset_last, ram_block_add): mapped after the sentinel's page, the code got its
+            offset, and the RAM and the device's page the code's offset again. The device's store then
+            counted as one into the running code (QEMU's precise self-modifying code, x86 only), which
+            Unicorn ran again in a block of its own. dread.engines.separate_ram_blocks (2026-10-28): a
+            page mapped and unmapped in every Unicorn engine of the layers switches Unicorn to QEMU's gap
+            search for good. Among the targets the same order of maps puts RAM or devices onto code in
+            gizmo rv32 and the FreeRTOS virt builds (RISC-V: no store runs twice there; a virt system
+            run took the same time with and without the fix) and the small i386 test targets.
           - [x] The HPET (0xfed00000): the main counter from the shared clock, timer 0's comparator and
             its interrupt (routed to the I/O APIC's input 2). dread.models.hpet (2026-10-28): the
             identification (vendor 0x8086, timers, period), the counter while enabled, one-shot and

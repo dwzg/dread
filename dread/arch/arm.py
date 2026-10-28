@@ -21,6 +21,7 @@ from capstone import arm as csarm
 from unicorn import arm_const as ua
 
 from dread.arch import M32, extend_bits, low_bits, sum_value, unshift
+from dread.engines import separate_ram_blocks
 
 REGS = tuple("r%d" % i for i in range(13)) + ("sp", "lr", "pc")
 ALIASES = {"sb": "r9", "sl": "r10", "fp": "r11", "ip": "r12", "r13": "sp", "r14": "lr", "r15": "pc"}
@@ -1408,7 +1409,7 @@ class Arm:
         engine = uc.Uc(uc.UC_ARCH_ARM, self.uc_mode(isa))
         if self.cpu is not None:
             engine.ctl_set_cpu_model(CPUS[self.cpu])
-        return engine
+        return separate_ram_blocks(engine)
 
     def initial_status(self, engine):
         """Put the core into the state a called function expects: on the A profile system mode

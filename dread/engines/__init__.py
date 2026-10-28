@@ -46,6 +46,9 @@ engines finish the instruction and leave pc behind it. DREAD therefore stops fro
 only where the run ends there; where it goes on, it stops at the next block (dread.sysrun).
 
 Not part of the contract: the C hooks of dread.fasthooks, which reach into Unicorn's C library.
+
+The layers make their unicorn.Uc through separate_ram_blocks: Unicorn 2.1.4 gives the RAM blocks of
+some orders of maps the same offsets, and a store then runs twice (its docstring).
 """
 from unicorn import UcError
 import unicorn.unicorn_const as C
@@ -64,6 +67,25 @@ KINDS = {
 ERRORS = {C.UC_MEM_READ_UNMAPPED: C.UC_ERR_READ_UNMAPPED, C.UC_MEM_WRITE_UNMAPPED: C.UC_ERR_WRITE_UNMAPPED,
           C.UC_MEM_FETCH_UNMAPPED: C.UC_ERR_FETCH_UNMAPPED, C.UC_MEM_READ_PROT: C.UC_ERR_READ_PROT,
           C.UC_MEM_WRITE_PROT: C.UC_ERR_WRITE_PROT, C.UC_MEM_FETCH_PROT: C.UC_ERR_FETCH_PROT}
+
+
+def separate_ram_blocks(engine):
+    """engine (a unicorn.Uc with nothing mapped yet), a page mapped and unmapped in it, so that the
+    RAM blocks of the maps that follow get offsets of their own. While no block has been freed,
+    Unicorn 2.1.4 gives a new block the offset behind the last block it remembers (QEMU's
+    ram_addr_t, by which the emulator tracks translated code and clean pages: qemu/exec.c,
+    find_ram_offset_last), and it does not remember a block larger than a page that it sorts in
+    front of a smaller one (ram_block_add). So after a smaller region, a larger one gets the offset
+    behind it, and the region after that the same offset again: its pages share their offsets with
+    the larger region's. A store to such a page counts as a store into the other page's translated
+    code (QEMU's precise self-modifying code): Unicorn drops the block that runs and runs the store
+    again in a block of its own, its hooks called twice. The system run logged a device's first
+    store twice so: the sentinel's page, the code and the device's page mapped in that order, the
+    device's page had the code's offset. A freed block switches Unicorn to QEMU's gap search, which
+    keeps blocks apart, for the engine's life."""
+    engine.mem_map(0, PAGE)
+    engine.mem_unmap(0, PAGE)
+    return engine
 
 
 class Fault(Exception):

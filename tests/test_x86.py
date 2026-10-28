@@ -1851,8 +1851,7 @@ def test_the_system_runs_port_space(tmp_path):
     (port_read) and takes out (port_write), each logged in order as a device access. This startup
     writes 0x5a to port 0x80, reads it back (the model answers 0xa5) and stores what it read into a
     device word. Until 2026-10-28 the system run had no port space: Unicorn answered every in with 0,
-    and FreeRTOS's IA32 demo waited forever for the PIT that times its calibration. (Its first store
-    goes to RAM: a run whose first memory access is a device's logs that access twice, an open item.)"""
+    and FreeRTOS's IA32 demo waited forever for the PIT that times its calibration."""
     target = small_i386(tmp_path, PORTS_RUN_C, "portrun")
     if target is None:
         pytest.skip("needs the host's gcc with -m32")
@@ -1870,6 +1869,31 @@ def test_the_system_runs_port_space(tmp_path):
     assert log == [("out", "port", 0x80, 1, 0x5a), ("in", "port", 0x80, 1, 0xa5, 1), ("write", "-", 0x40000000, 4, 0xa5)], log
     assert outcome.reports["port"] == {"seen": [0x5a]}
 
+
+
+FIRST_STORE_C = r"""
+__asm__(".text\n.globl _start\n.type _start, @function\n_start:\n"
+        "    movl $0xa5, %eax\n    movl %eax, 0x40000000\n"
+        "1:  hlt\n    jmp 1b\n.size _start, .-_start\n");
+"""
+
+
+def test_a_device_store_first_is_logged_once(tmp_path):
+    """A run whose first memory access is a store to a device logs it once. Until 2026-10-28 it was
+    logged twice: Unicorn 2.1.4 had given the device's page the RAM offset of the code's first page
+    (the small target's scratch, sentinel, code, RAM and device mapped in that order), took the store
+    for one into the running code and ran it again (dread.engines.separate_ram_blocks)."""
+    target = small_i386(tmp_path, FIRST_STORE_C, "firststore")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import sysrun
+    from dread.target import Target
+    toml = tmp_path / "firststore" / "dread.toml"
+    toml.write_text(toml.read_text().replace("sentinel = ", "io = [[0x40000000, 0x40001000]]\nsentinel = "))
+    target = Target.load(str(toml))
+    image = target.image()
+    outcome = sysrun.run_image(target, image, image.payload(), {"limit": 100000})
+    assert [e for e in outcome.log if e[0] == "write"] == [("write", "-", 0x40000000, 4, 0xa5)]
 
 
 SOFTINT_C = r"""

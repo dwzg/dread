@@ -21,6 +21,7 @@ import unicorn as uc
 from unicorn import riscv_const as ur
 
 from dread.arch import M32, low_bits, sum_value, unshift
+from dread.engines import separate_ram_blocks
 
 NAMES = ["zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1"] + ["a%d" % i for i in range(8)] + \
         ["s%d" % i for i in range(2, 12)] + ["t3", "t4", "t5", "t6"]
@@ -746,7 +747,7 @@ class RiscV:
         return uc.UC_MODE_RISCV32
 
     def new_uc(self, isa=None):
-        return uc.Uc(uc.UC_ARCH_RISCV, uc.UC_MODE_RISCV32)
+        return separate_ram_blocks(uc.Uc(uc.UC_ARCH_RISCV, uc.UC_MODE_RISCV32))
 
     CALL_CSRS = ("MSTATUS", "MIE", "MSCRATCH", "MEPC", "MCAUSE", "MTVAL", "MTVEC")
 

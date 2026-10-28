@@ -303,3 +303,32 @@ def test_the_engine_agrees_with_gdbs_simulator():
     from dread.engines import msp430_check
     bad = msp430_check.run_check(240, 7)
     assert not bad, bad[:3]
+
+
+@pytest.mark.parametrize("spec, code, start", [
+    ({"name": "x86", "isa": "i386"},                        # mov eax, 0xa5; mov [0x40000000], eax
+     bytes.fromhex("b8a5000000" "a300000040"), 0x08000000),
+    ({"name": "arm", "isa": "t32", "profile": "m"},         # movs r0, #0xa5; movs r1, #1; lsls r1, r1, #30;
+     bytes.fromhex("a520" "0121" "8907" "0860"), 0x08000001),   # str r0, [r1]
+    ({"name": "riscv", "isa": "rv32", "extensions": "imac"},    # li a0, 0xa5; lui a1, 0x40000; sw a0, 0(a1)
+     struct.pack("<3I", 0x0A500513, 0x400005B7, 0x00A5A023), 0x08000000),
+])
+def test_the_layers_engines_keep_ram_blocks_apart(spec, code, start):
+    """dread.engines.separate_ram_blocks, through every Unicorn layer's new_uc: mapped in the order the
+    system run maps a small target (a page, a larger code region, then the device's page), the RAM
+    blocks get offsets of their own, and a store to the device page runs once. On a bare unicorn.Uc,
+    Unicorn 2.1.4 gives the device's page the code's offset; for x86, which QEMU builds with precise
+    self-modifying code, it takes the store for a store into the running code and runs it again, its
+    hook seeing two writes (the system run logged a device's first store twice until 2026-10-28);
+    ARM and RISC-V drop the code's translations at such a store without running it again, so their
+    rows pass on a bare engine too."""
+    from dread.arch import get as arch_get
+    engine = arch_get(spec).new_uc()
+    for base, size in ((0x00F00000, 0x1000), (0x08000000, 0x10000), (0x40000000, 0x1000)):
+        engine.mem_map(base, size)
+    engine.mem_write(0x08000000, code)
+    writes = []
+    engine.hook_add(C.UC_HOOK_MEM_WRITE, lambda e, access, address, size, value, user: writes.append((address, value)),
+                    None, 0x40000000, 0x40000FFF)
+    engine.emu_start(start, 0x08000000 + len(code))
+    assert writes == [(0x40000000, 0xA5)]

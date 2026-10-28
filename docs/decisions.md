@@ -5624,3 +5624,16 @@ pushal; cld; call; popal; iret) was refused for its pushal.
   saves_out leaves out. What differs from the original is the stack below the interrupted code's
   stack pointer (fewer words saved, the stack realigned), which nothing reads. Only the system run
   tests such a function. A handler that switches stacks or reads its interrupt frame stays refused.
+
+## Every Unicorn engine starts with a page mapped and unmapped (2026-10-28)
+
+**Decided by recommendation.** Unicorn 2.1.4 gives the RAM blocks of some orders of maps the same
+offsets (dread.engines.separate_ram_blocks has how), and on x86 a store to a page that shares its
+offset with the running code runs twice: the system run logged a small target's first device store
+twice.
+
+- **Map the regions largest first**: no block larger than a page is then sorted in front of a smaller
+  one; but every map made later (a machine's maps of one run, dread.emu) would have to keep the order.
+- **Taken: a page mapped and unmapped first**, in every layer's new_uc: a freed block switches Unicorn
+  to QEMU's gap search for the engine's life, whatever is mapped later and in which order. One map and
+  one unmap per engine.

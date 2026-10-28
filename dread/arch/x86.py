@@ -35,6 +35,7 @@ from unicorn import UC_ARCH_X86, UC_MODE_32, Uc
 from unicorn import x86_const as UX
 
 from dread.arch import extend_bits, low_bits, sum_value, unshift
+from dread.engines import separate_ram_blocks
 
 NAMES = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"]
 # the full register of each name capstone may report (the 8- and 16-bit parts of the eight)
@@ -995,7 +996,7 @@ class X86:
         return UC_MODE_32
 
     def new_uc(self, isa=None):
-        return Uc(UC_ARCH_X86, UC_MODE_32)
+        return separate_ram_blocks(Uc(UC_ARCH_X86, UC_MODE_32))
 
     def initial_status(self, engine):
         engine.reg_write(UX.UC_X86_REG_EFLAGS, EFLAGS_INIT)
