@@ -10,12 +10,19 @@
     size = 0x10            # the bytes of register space the model owns
     irq = 3                # optional: the interrupt raised while a byte waits (an interrupt model
                            # must deliver it)
+    lcr = 0xc              # optional: a 16550's line control register, whose bit dlab (0x80 by
+    dlab = 0x80            # default) turns the data register into the divisor latch's low byte
 
 A store to the data register sends its low byte: the bytes sent are the model's report, the text a
 scenario can wait for. A load takes the next byte of the receive queue (0 when it is empty). Reads
 of other registers in the range are plain memory. Every read but the data register's is plain
 (dread.models), and every write but the data register's (it sends) is idempotent. Assumed: no
 transmit delay, no overrun, no other status bits.
+
+With lcr, a store to the data register while the line control register's dlab bit is set writes the
+divisor, not a byte to send, and a load there reads it back (a 16550 at a stride of four, as the
+Quark's UART that FreeRTOS's IA32 demo sets up: data 0x0, status 0x14 with tx_ready 0x60 and rx_ready
+0x01, lcr 0xc). Without it the divisor's store counted as a byte sent.
 """
 from dread.models import Model, without
 
@@ -34,11 +41,15 @@ class Uart(Model):
         self.plain = without(self.ranges, [(self.data_at, self.data_at + 1)])     # a read takes a byte
         self.idempotent = without(self.ranges, [(self.data_at, self.data_at + 1)])    # a write sends one
         self.sent, self.queue = bytearray(), bytearray()
+        self.lcr_at = self.base + self.number("lcr") if self.config.get("lcr") is not None else None
+        self.dlab, self.latched = self.number("dlab", 0x80), False
 
     def read(self, address, size):
         if address == self.status_at:
             return self.tx_ready | (self.rx_ready if self.queue else 0)
         if address == self.data_at:
+            if self.latched:
+                return None                 # (the divisor latch: plain memory)
             if not self.queue:
                 return 0
             byte = self.queue.pop(0)
@@ -47,7 +58,9 @@ class Uart(Model):
         return None
 
     def write(self, address, size, value):
-        if address == self.data_at:
+        if address == self.lcr_at:
+            self.latched = bool(value & self.dlab)
+        if address == self.data_at and not self.latched:
             self.sent.append(value & 0xFF)
             self.system.note(self.name, "sent", value & 0xFF)
 

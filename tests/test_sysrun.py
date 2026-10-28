@@ -2265,3 +2265,29 @@ def test_registers_that_answer_configured_words():
     assert pci.read(0xe00a5012, 4) == 0xffff9000         # (across two words: the next one's default)
     with pytest.raises(ValueError, match="4-aligned"):
         create(None, "bad", {"kind": "regs", "base": 0, "size": 0x10, "words": {"0x2": 1}}, ".")
+
+
+def test_a_16550s_divisor_latch_sends_nothing():
+    """dread.models.uart with lcr: while the line control register's dlab bit is set, a store to the
+    data register writes the divisor (FreeRTOS's IA32 demo sets its UART to 115200 baud so: lcr 0x83,
+    0x18 into the data register, lcr 3), which the model counted as a byte sent until 2026-10-28."""
+    from dread.models import create
+
+    class System:
+        def __init__(self):
+            self.notes = []
+
+        def note(self, *what):
+            self.notes.append(what)
+
+        def interrupt_level(self, line, level):
+            pass
+    uart = create(System(), "uart", {"kind": "uart", "base": 0x9000b000, "data": 0, "status": 0x14,
+                                     "tx_ready": 0x60, "rx_ready": 1, "size": 0x20, "lcr": 0xc}, ".")
+    uart.write(0x9000b00c, 1, 0x83)
+    uart.write(0x9000b000, 1, 0x18)
+    assert uart.read(0x9000b000, 1) is None         # (the divisor: plain memory)
+    uart.write(0x9000b00c, 1, 0x03)
+    for c in b"ok":
+        uart.write(0x9000b000, 1, c)
+    assert uart.report() == {"sent": "ok"} and uart.read(0x9000b014, 1) == 0x60
