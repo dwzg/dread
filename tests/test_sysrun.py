@@ -2291,3 +2291,44 @@ def test_a_16550s_divisor_latch_sends_nothing():
     for c in b"ok":
         uart.write(0x9000b000, 1, c)
     assert uart.report() == {"sent": "ok"} and uart.read(0x9000b014, 1) == 0x60
+
+
+def test_the_pits_counter_two_times_a_delay():
+    """dread.models.pit: counter 2 as FreeRTOS's IA32 demo uses it to calibrate its timer: gate high,
+    the control word 0xb2 (counter 2, low then high byte, mode 1), the count 0x2e9c, the gate dropped
+    and raised (the one-shot starts), then port 0x61's bit 5 (the output) polled until it is high: low
+    for count * rate units of the shared clock. Mode 0 goes low with the control word and high when its
+    count runs down; a latched count reads back low byte then high byte; port 0x61's bits 0 to 3 read
+    as written."""
+    from dread.models import create
+
+    class System:
+        clock = 0
+    system = System()
+    pit = create(system, "pit", {"kind": "pit", "rate": 2}, ".")
+    assert pit.ports == [(0x40, 0x44), (0x61, 0x62)]
+    pit.port_write(0x61, 2, (pit.port_read(0x61, 2) & 0xfc) | 1)
+    pit.port_write(0x43, 1, 0xb2)
+    pit.port_write(0x42, 1, 0x9c)
+    pit.port_write(0x42, 1, 0x2e)
+    assert pit.port_read(0x61, 1) == 0x21               # (mode 1: high until the gate rises)
+    pit.port_write(0x61, 2, pit.port_read(0x61, 2) & 0xfe)
+    system.clock = 100
+    pit.port_write(0x61, 2, pit.port_read(0x61, 2) | 1)
+    assert pit.port_read(0x61, 1) & 0x20 == 0
+    system.clock = 100 + 2 * 0x2e9c - 1
+    assert pit.port_read(0x61, 1) & 0x20 == 0
+    pit.port_write(0x43, 1, 0x80)                       # (latch counter 2)
+    assert pit.port_read(0x42, 1) == 1 and pit.port_read(0x42, 1) == 0
+    system.clock = 100 + 2 * 0x2e9c
+    assert pit.port_read(0x61, 1) & 0x20 == 0x20
+    pit.port_write(0x43, 1, 0xb0)                       # (counter 2, mode 0)
+    assert pit.port_read(0x61, 1) & 0x20 == 0
+    pit.port_write(0x42, 1, 0x10)
+    pit.port_write(0x42, 1, 0x00)
+    system.clock += 2 * 0x10 - 1
+    assert pit.port_read(0x61, 1) & 0x20 == 0
+    system.clock += 1
+    assert pit.port_read(0x61, 1) & 0x20 == 0x20
+    pit.port_write(0x61, 1, 0x0e)
+    assert pit.port_read(0x61, 1) & 0x0f == 0x0e

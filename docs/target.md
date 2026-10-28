@@ -221,7 +221,10 @@ and SVCall for svc; exceptions are taken through VTOR's vector table, on the mai
 stack as the core does), `clint` (RISC-V's core-local interruptor: mtime from the shared clock,
 mtimecmp and msip, the machine timer and software interrupts under mstatus.MIE and mie; ecall traps
 to mtvec, mret runs in the emulator), `regs` (registers answering configured words and keeping what
-is stored: identification registers, a PCI configuration space with its devices' base addresses). A model names the registers whose reads are plain (`plain`, as
+is stored: identification registers, a PCI configuration space with its devices' base addresses),
+`pit` (a PC's 8254 at ports 0x40 to 0x43 and the system control port 0x61: counters in modes 0 and 1
+against the shared clock, counter 2's gate and output, as a firmware times a delay with them; models
+of x86's port space own `ports` and answer port_read and port_write). A model names the registers whose reads are plain (`plain`, as
 `dread.models` describes it: no side effect, a value only a call into the models changes); the
 system run then does repeated reads of them without asking the model (in C on Unicorn). Likewise
 the registers whose writes are idempotent (`idempotent`: a write made again with the same size and

@@ -6915,7 +6915,13 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
             a model's ports ([(lo, hi)]) with port_read and port_write, each access logged in order ("in",
             repeats counted, "out") and timed as a device access; a port no model owns reads 0.
             tests/test_x86.py: out to a model's port, in from it, the value stored to a device word.
-          - [ ] The PIT's channel 2 and port 0x61, as far as that calibration needs.
+          - [x] The PIT's channel 2 and port 0x61, as far as that calibration needs (dread.models.pit,
+            2026-10-28: modes 0 and 1 against the shared clock, counter 2's gate and output at port 0x61,
+            latched counts). With it the demo gets through the calibration's one-shot and prints its
+            first line: "ASSERT: File = .../HPET.c, Line = 347", the HPET's identification register read
+            as 0 (vendor 0x8086 expected). On the way it reads the legacy bridge's GPIO base through the
+            configuration ports (out 0xcf8 0x8000f844, in 0xcfc), gets 0, and its GPIO accesses land on
+            ports 0x0 to 0x44, one of them the PIT's 0x40.
           - [ ] A run whose first memory access goes to a device logs it twice (found 2026-10-28 on
             small i386 programs, on main as well): movl $0xa5, %eax; movl %eax, 0x40000000 at the entry
             gives two writes, the second one done by the C hook after Python's _io had registered the
