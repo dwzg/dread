@@ -227,7 +227,8 @@ against the shared clock, counter 2's gate and output, as a firmware times a del
 of x86's port space own `ports` and answer port_read and port_write), `pci` (a PCI configuration
 space: regs words in memory and through the ports 0xcf8 and 0xcfc), `hpet` (a PC's HPET: its
 identification, the main counter from the shared clock, one-shot and periodic timers raising lines,
-legacy routing to lines 2 and 8). A model names the registers whose reads are plain (`plain`, as
+legacy routing to lines 2 and 8), `dwi2c` (a DesignWare I2C controller with register-file devices on
+its bus: transfers at once, stop detected, the receive FIFO, aborts for a target nobody answers). A model names the registers whose reads are plain (`plain`, as
 `dread.models` describes it: no side effect, a value only a call into the models changes); the
 system run then does repeated reads of them without asking the model (in C on Unicorn). Likewise
 the registers whose writes are idempotent (`idempotent`: a write made again with the same size and

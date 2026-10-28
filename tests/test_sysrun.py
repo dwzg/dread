@@ -2406,3 +2406,29 @@ def test_the_hpets_counter_and_timers():
     hpet.write(0xfed00010, 4, 2)                        # (stopped: the counter stands)
     system.clock += 400
     assert hpet.read(0xfed000f0, 4) == 2000 and hpet.next_event() is None
+
+
+def test_a_designware_i2c_controller_with_register_devices():
+    """dread.models.dwi2c: writes and reads of a register-file device as FreeRTOS's IA32 demo drives
+    the Galileo Gen 2's PCAL9555 port expanders: the target, enable and its status, the register's
+    number then its value with a stop (the stop detected in the raw status, cleared by its clear
+    register's read), a register read back through the receive FIFO (its level, the status's bit 3),
+    and a target no device answers aborting."""
+    from dread.models import create
+    i2c = create(None, "i2c", {"kind": "dwi2c", "base": 0x9000c000, "devices": [0x25]}, ".")
+    b = 0x9000c000
+    i2c.write(b + 0x04, 4, 0x25)
+    i2c.write(b + 0x6c, 4, 1)
+    assert i2c.read(b + 0x9c, 4) == 1
+    i2c.write(b + 0x10, 4, 0x02)                        # (the register: output port 0)
+    i2c.write(b + 0x10, 4, 0x200 | 0xfe)                # (its value, with a stop)
+    assert i2c.read(b + 0x34, 4) & (1 << 9) and i2c.report() == {"0x25": {"0x02": 0xfe}}
+    assert i2c.read(b + 0x60, 4) == 0 and i2c.read(b + 0x34, 4) == 0
+    i2c.write(b + 0x10, 4, 0x02)
+    i2c.write(b + 0x10, 4, 0x300)                       # (a read command, with a stop)
+    assert i2c.read(b + 0x78, 4) == 1 and i2c.read(b + 0x70, 4) & 8 and i2c.read(b + 0x10, 4) == 0xfe
+    assert i2c.read(b + 0x78, 4) == 0 and not i2c.read(b + 0x70, 4) & 8
+    i2c.write(b + 0x04, 4, 0x40)
+    i2c.write(b + 0x10, 4, 0x200 | 1)
+    assert i2c.read(b + 0x34, 4) == (1 << 6) | (1 << 9)
+    assert i2c.read(b + 0x40, 4) == 0 and i2c.read(b + 0x34, 4) == 0

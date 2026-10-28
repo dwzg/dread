@@ -90,9 +90,10 @@ def without(ranges, holes):
 
 
 def classes():
-    from dread.models import clint, gpio, hpet, intc, nvic, pci, pit, regs, timer, uart
+    from dread.models import clint, dwi2c, gpio, hpet, intc, nvic, pci, pit, regs, timer, uart
     return {"uart": uart.Uart, "timer": timer.Timer, "intc": intc.Intc, "nvic": nvic.Nvic, "gpio": gpio.Gpio,
-            "clint": clint.Clint, "regs": regs.Regs, "pit": pit.Pit, "pci": pci.Pci, "hpet": hpet.Hpet}
+            "clint": clint.Clint, "regs": regs.Regs, "pit": pit.Pit, "pci": pci.Pci, "hpet": hpet.Hpet,
+            "dwi2c": dwi2c.DwI2c}
 
 
 def create(system, name, config, root):

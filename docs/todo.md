@@ -6940,9 +6940,16 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
             with the status, legacy routing. The demo passes its checks, sets up timers 0 to 2, starts
             the counter, and then reads the I2C controller's BAR0 (0xe00aa010: device 21, function 2)
             as all ones and faults on memory at 0xffffffff.
-          - [ ] The I2C controller (the Quark's DesignWare one at device 21, function 2: its BAR0) and
+          - [x] The I2C controller (the Quark's DesignWare one at device 21, function 2: its BAR0) and
             the port expander behind it (the Galileo Gen 2's LEDs): enable and its status, transfers
-            with stop detect, the receive FIFO's level, a register file for the device.
+            with stop detect, the receive FIFO's level, a register file for the device. dread.models.dwi2c
+            (2026-10-28), the expanders at 0x25 to 0x27. With it the demo prints its banner on the UART
+            ("HELLO from the multiboot compliant FreeRTOS kernel!", "Running main_full()."), sets up the
+            expanders, programs the local APIC's timer (periodic, vector 0x21) and starts its tasks: 95
+            functions entered, until prvTimerTask yields with int 0x20, which the system run stops at
+            ("CPU exception 32"): software interrupts through the IDT are next.
+          - [ ] x86's int N in the system run, taken through the IDT's gate as the core takes it (the
+            port's yield: int 0x20), where the run now stops for any exception the core raises but svc.
           - [ ] The local APIC (0xfee00000: its timer, which the calibration reads and FreeRTOS's tick
             uses, end of interrupt, the error and spurious vectors) and the I/O APIC (0xfec00000: the
             redirection the demo writes), delivering vectors through the IDT.
