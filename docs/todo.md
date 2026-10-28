@@ -6743,15 +6743,23 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         stack parameters is readable again with it. tests/test_readable.py: the
         qualifier and the store's signature; tests/test_x86.py: the retry end to end, a stand-in making
         the spill (the compiler's choice, which changes with its version).
-      - [ ] GCC 11 drops a volatile store into a parameter's own word right before the return (found
+      - [x] GCC 11 drops a volatile store into a parameter's own word right before the return (found
         2026-10-28 in CI's ubuntu-22.04 container, by the test above's first stand-in: *(volatile u32 *)
         (u32)&sa0 = 0x5a5a5a5au; return d0 + sa1; compiled to no store at all; GCC 13 and 16 keep it):
         the object is a parameter, not volatile, and its life ends at the return. The lifters write an
         original's store into its argument word the same way (dread.tidy stack_params keeps those
-        accesses), so built by GCC 11 such a function could lose the store, which the comparison sees: a
-        function refused or dropped, not a wrong result kept. Not seen on a target yet; a test on CI's
-        older runner would tell. A way, if it shows: the parameter itself volatile where the function
-        writes it, as volatile_stack does for a spill.
+        accesses), so built by GCC 11 such a function lost the store, which the comparison sees: a
+        function dropped, not a wrong result kept. In the same container, GCC 11.4 for i386 dropped the
+        store into a plain parameter's word and kept it into a volatile one; arm-none-eabi-gcc 10.3
+        kept both. Since 2026-10-28 (dread.lift_x86 written_words, decisions.md) the x86 lifter declares
+        a stack parameter volatile where the body uses its word's address for anything but a load (a
+        store, the address kept or handed on), the others plain. On the IA32 bench builds 29, 18 and 16
+        functions (GCC -Os, -O2, clang) got such a head; with the host's GCC the lift checks accept the
+        same functions (257, 231, 236) and the readable checks too (256, 230, 236). The GCC -O2 build's
+        lift check in CI's ubuntu-22.04 image with GCC 11: 230 accepted with the plain heads, vTaskDelay
+        dropped (its store into its argument's word), 231 with these, none lost. ARM's lifter stays as
+        it is. tests/test_x86.py: bump, assembly that stores into its argument word right before ret,
+        lifted with a volatile head and accepted, weigh plain beside it.
       - [x] x86's pointers became word arrays, not structures: uxListRemove's sa0 was volatile u32 * with
         sa0[1], sa0[2], sa0[4], where ARM's r0 is a struct s_15 * with r0->f_4, f_8, f_10. The cause
         (2026-10-27): x86's lifter writes an access's address inside an integer cast, *(volatile u32 *)((u32)

@@ -1643,6 +1643,53 @@ def test_a_store_into_a_stack_arguments_word_makes_the_parameters_volatile(tmp_p
     assert json.load(open(image.table("readable_types"))).get("volatile_params") == ["weigh"]
 
 
+
+ARGSTORE_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+u32 bump(u32 n);
+__asm__(".text\n.globl bump\n.type bump, @function\nbump:\n"
+        "    movl 4(%esp), %eax\n    addl $1, %eax\n    movl %eax, 4(%esp)\n    ret\n.size bump, .-bump\n");
+
+__attribute__((noinline)) u32 weigh(u32 n, u32 k)
+{
+    return n * 3u + k;
+}
+
+void _start(void)
+{
+    sink[0] = bump(sink[1]);
+    sink[3] = weigh(sink[0], sink[2]);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_an_argument_word_the_function_writes_is_volatile_in_its_head(tmp_path):
+    """An original's store into its own argument word (bump, four instructions of assembly, the store
+    right before ret) stays in the lifted C on every GCC: the head declares a stack parameter volatile
+    where the body uses its word for anything but a load (dread.lift_x86 written_words). GCC 11 (CI's
+    ubuntu-22.04 image) compiled the store into a plain parameter's word to nothing, and the lift check
+    dropped bump with every case failing; GCC 13 and 16 keep it. weigh, which only reads its arguments,
+    keeps them plain, which dread.tidy stack_params uses as themselves. Both pass the lift check and the
+    readable gate."""
+    target = small_i386(tmp_path, ARGSTORE_C, "argstore")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import build, lift, readable
+    image = target.image()
+    lines = []
+    assert sorted(lift.check(target, image, ["bump", "weigh"], out=lines.append, jobs=2)) == ["bump", "weigh"], lines
+    build.lift_sources(target, image, ["bump", "weigh"], str(tmp_path / "one"), quiet=True)
+    bump = (tmp_path / "one" / "bump.c").read_text()
+    weigh = (tmp_path / "one" / "weigh.c").read_text()
+    assert "u32 bump(u32 eax_in, volatile u32 sa0)" in bump, bump
+    assert "u32 weigh(u32 eax_in, u32 sa0, u32 sa1)" in weigh, weigh
+    lines = []
+    assert sorted(readable.check(target, image, out=lines.append, jobs=2)) == ["bump", "weigh"], lines
+
+
 def test_the_layer_takes_values_apart():
     """The x86 layer's hooks for dread.uncovered, dread.relations and dread.statics: value_step gives an
     access at a fixed address with base 0 (absolute_accesses) and none at an unknown base, values for

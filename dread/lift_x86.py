@@ -1534,6 +1534,27 @@ class X86Lifter(lift.Lifter):
             raise Refused("0x%x raises an interrupt: %s %s" % (insn.address, insn.mnemonic, insn.op_str))
         return '{ __asm__ volatile ("int $0x%x" : "+a"(eax), "+c"(ecx), "+d"(edx) :: "memory", "cc"); }' % ops[0].imm
 
+    @staticmethod
+    def written_words(body, nstack):
+        """The stack arguments the body may write: those whose address it uses for anything but a load
+        (a store through it, the address kept in a register or handed on). The head declares them
+        volatile: GCC 11 compiled a store into a plain parameter's word right before the return,
+        *(volatile u32 *)((u32)&sa0) = ...;, to nothing (the object is the parameter, not volatile, and
+        its life ends there), so the lifted C lost the original's store into its argument word and the
+        lift check dropped the function (found 2026-10-28 in CI's ubuntu-22.04 image; GCC 13 and 16 for
+        i386, and GCC 10 and 16 for ARM, keep it). A function that only reads them keeps them plain,
+        which dread.tidy stack_params takes for parameters used as themselves."""
+        import re
+        text = "\n".join(body)
+        out = set()
+        for k in range(nstack):
+            uses = len(re.findall(r"&sa%d\b" % k, text))
+            loads = len(re.findall(r"\*\(volatile u\d+ \*\)\((?:\(\(u32\)&sa%d \+ \d+u\)|\(u32\)&sa%d)\)(?!\s*=(?!=))"
+                                   % (k, k), text))
+            if uses > loads:
+                out.add(k)
+        return out
+
     def render(self, fn, body):
         ctx = self.ctx
         lines = ["/* %s at 0x%x, lifted by dread lift: one statement per instruction. */" % (fn.name, fn.entry),
@@ -1549,7 +1570,9 @@ class X86Lifter(lift.Lifter):
             convention = "" if words[name] < 0 or nregs[name] == len(own) else \
                 " __attribute__((regparm(%d)))" % nregs[name]
             lines.append("extern %s %s(%s)%s;" % (CTYPES[width], name, params, convention))
-        params = ["u32 %s_in" % r for r in own] + ["u32 sa%d" % k for k in range(ctx["stack_params"])]
+        written = self.written_words(body, ctx["stack_params"])
+        params = ["u32 %s_in" % r for r in own] + ["%su32 sa%d" % ("volatile " if k in written else "", k)
+                                                   for k in range(ctx["stack_params"])]
         lines.append("%s %s(%s)" % (CTYPES[self._width(fn.name)], fn.name, ", ".join(params)))
         lines.append("{")
         lines.append("    u32 %s;" % ", ".join("%s = %s" % (r, r + "_in" if r in own else "0") for r in REGS))

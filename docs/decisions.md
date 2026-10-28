@@ -5590,3 +5590,22 @@ FreeRTOS build; a private firmware). A volatile parameter lives in its word, so 
   went wrong, so this retry comes first. What could still go wrong: such a store for another reason (a
   sibling call that passes stack arguments writes the caller's words too, and no qualifier stops it):
   the function fails once more and goes on to the other retries, one round later than before.
+
+## The x86 lifter declares a written stack argument volatile (2026-10-28)
+
+**Decided by recommendation.** GCC 11 (Ubuntu 22.04, CI's older runner) drops a store into a plain
+parameter's word right before the return, although the C writes it through a volatile lvalue,
+*(volatile u32 *)((u32)&sa0) = ...: the object itself is not volatile and its life ends there. The
+lifted C writes an original's store into its argument word so, and the lift check dropped such a
+function built by GCC 11; GCC 13 and 16 keep the store, and so do arm-none-eabi-gcc 10 and 16.
+
+- **Every stack parameter volatile:** the simplest, but dread.tidy stack_params takes plain u32
+  parameters for those used as themselves and would have to strip the qualifier again, and the
+  readable C would show volatile on every parameter it does not convert.
+- **The address laundered** through an asm statement, so that no compiler sees which object it is:
+  every access to a stack argument would carry one, in the lifted C and through the readable passes.
+- **Taken: volatile where the body uses the word's address for anything but a load** (a store through
+  it, the address kept in a register or handed on: dread.lift_x86 written_words), the others plain.
+  Conservative where the address escapes (a va_list's walk, an argument's address handed to a callee):
+  others may write those words; with the host's GCC the IA32 builds' lift checks accept the same
+  functions as without it. ARM's lifter stays as it is: its compilers keep the store.
