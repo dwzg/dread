@@ -8,8 +8,9 @@ cases the lift check accepted it with, and keeps a function's readable C only wh
 run every instruction of the original, as for lifted C, and when the whole image's scenarios agree;
 a function that fails is built from its lifted C again (one whose frame's objects, dread.frames, its
 cases reject is tried once more first, its frame's region one object: the readable_types table's
-whole; one whose code reaches another function that fails in the same round is tried once more with
-that one from lifted C, since its cases run their callees for real). The functions accepted go into the image's
+whole; one whose cases differ by a store into its stack arguments' words, with its stack parameters
+volatile: volatile_stack; one whose code reaches another function that fails in the same round is
+tried once more with that one from lifted C, since its cases run their callees for real). The functions accepted go into the image's
 readable table (config/readable.txt), and dread recon builds them from readable C. Names and types
 are left to the pilot (dread pilot).
 
@@ -389,7 +390,7 @@ def transform(name, text, stages=None, context=None):
 
 IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
 SCOPED = ("typed", "digests", "params", "variables", "prototypes", "keeps", "returns", "takes", "masks", "whole", "divcalls",
-          "results")        # the readable_types table's parts kept per function (shapes.Plan's attributes)
+          "results", "volatile_params")     # the readable_types table's parts kept per function (shapes.Plan's)
 _SCOPE = True               # False: every function made from the whole context (remade: what --verify compares)
 
 
@@ -1381,6 +1382,11 @@ def _named(name, text, stages, context=None, cleaned=None):
         if context is not None and getattr(context, "folds_memory", False):
             from dread import volorder
             volorder.guard(tree, fn)        # (x86: two volatile loads one statement combines kept in order)
+        # (the check's retry for a store into its stack arguments' words: volatile_stack, before cdecl,
+        # which drops eax_in, while the head's places are still the lifted C's)
+        plan_ = getattr(context, "plan", None) if context is not None else None
+        if fn.name in (getattr(plan_, "volatile_params", None) or ()):
+            volatile_stack(fn, text)
         cdecl(tree, fn, text)
     return tree, fn, stages
 
@@ -1388,15 +1394,162 @@ def _named(name, text, stages, context=None, cleaned=None):
 CDECL = "__attribute__((regparm(0))) "      # (the head of readable C compiled cdecl: see cdecl)
 
 
+def _lifted_head(text, name):
+    """The lifted C's head of name in text (group 1: its parameters), or None."""
+    import re
+    return re.search(r"^(?!extern\b)[^\n(]*\b%s\(([^)\n]*)\)\s*$" % re.escape(name), text or "", re.M)
+
+
 def lifted_registers(text, name):
     """The register parameters of the lifted C's head of name (x86: eax_in, and edx_in and ecx_in for a
     function of regparm 3), as the lifter wrote them, before the naming renamed any; None where the text
     has no such head."""
-    import re
-    m = re.search(r"^(?!extern\b)[^\n(]*\b%s\(([^)\n]*)\)\s*$" % re.escape(name), text or "", re.M)
+    m = _lifted_head(text, name)
     if m is None:
         return None
     return [p.split()[-1] for p in m.group(1).split(",") if p.split() and p.split()[-1].endswith("_in")]
+
+
+def lifted_params(text, name):
+    """The parameters of the lifted C's head of name, by name and in order, as the lifter wrote them;
+    None where the text has no such head."""
+    m = _lifted_head(text, name)
+    if m is None:
+        return None
+    return [p.split()[-1].lstrip("*") for p in m.group(1).split(",") if p.split() and p.strip() not in ("void", "...")]
+
+
+def stack_words(text, name):
+    """The positions in the lifted C's head of name of the parameters its body reads through their
+    address: the stack arguments, which the lifters read where the caller put them (dread.lift's
+    *(volatile u32 *)((u32)&s0), dread.lift_x86's &sa0). An empty set where there are none."""
+    import re
+    m = _lifted_head(text, name)
+    if m is None:
+        return set()
+    params = lifted_params(text, name) or []
+    body = text[m.end():]
+    return {i for i, p in enumerate(params)
+            if re.search(r"\(u32\)\s*&\s*%s\b|\(volatile u32 \*\)\s*&\s*%s\b" % (re.escape(p), re.escape(p)), body)}
+
+
+def _address_taken(fn):
+    """The names whose address fn's body takes (&name)."""
+    from dread.cflow import walk_expr
+    from dread.tidy import _flat, _stmt_all_exprs
+    out = set()
+    for s in fn.body.body:
+        for st in _flat(s):
+            for e in _stmt_all_exprs(st):
+                for x in walk_expr(e):
+                    if isinstance(x, cparse.Unary) and x.op == "&" and isinstance(x.e, cparse.Name):
+                        out.add(x.e.id)
+    return out
+
+
+def _volatile_type(t):
+    """t qualified volatile itself, not what it points to (u32: volatile u32; volatile u32 *: volatile
+    u32 *volatile); None for a type the declaration writes around the name (a function's pointer, an
+    array), which stays as it is."""
+    t = t.strip()
+    if "(" in t or "[" in t:
+        return None
+    if t.endswith("*"):
+        return t + "volatile"
+    if "*" in t:                            # (qualified after its last *: volatile already, or const)
+        return t if t.split("*")[-1].split().count("volatile") else t + " volatile"
+    return t if "volatile" in t.split() else "volatile " + t
+
+
+def _head_with(head, name, changed):
+    """head (a function's declaration as written) with the parameters changed names ({name: type})
+    declared with their new types, every other part as it was."""
+    import re
+    m = re.search(r"\b%s\(" % re.escape(name), head)
+    if m is None:
+        return head
+    start, depth, parts, part = m.end(), 1, [], ""
+    for k in range(start, len(head)):
+        ch = head[k]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                parts.append(part)
+                break
+        if ch == "," and depth == 1:
+            parts.append(part)
+            part = ""
+        else:
+            part += ch
+    else:
+        return head
+    out = []
+    for p in parts:
+        ids = re.findall(r"[A-Za-z_]\w*", p)
+        if ids and ids[-1] in changed:
+            t = changed[ids[-1]]
+            p = p[:len(p) - len(p.lstrip())] + "%s%s%s" % (t, "" if t.endswith("*") else " ", ids[-1])
+        out.append(p)
+    return head[:start] + ",".join(out) + head[k:]
+
+
+def volatile_stack(fn, text):
+    """The stack parameters that dread.tidy stack_params made parameters used as themselves, declared
+    volatile: for a function whose readable C the check's cases rejected for a store into its stack
+    arguments' words (the readable_types table's volatile_params, argument_stores). Used as itself, a
+    stack parameter's incoming word is the compiler's to spill into once the parameter is dead, a store
+    into the caller's frame that the original never makes (on a private firmware, 2026-10-28; GCC -O2
+    on the IA32 FreeRTOS build stored xEventGroupWaitBits's sa1 into sa3's word, 2026-10-27). A volatile
+    parameter lives in its word, every read and write the word's, as the original has it; the types and
+    the names stay (volatile u32 *volatile p). text, the lifted C, says which parameters are the stack
+    arguments (stack_words), by their place in the head: the names may have changed since, and the
+    readable passes before it drop only trailing parameters (dread.tidy params); it comes before the
+    cdecl step, which drops the first (eax_in) and writes the head anew from the parameters' types. A
+    parameter whose address the readable C still takes keeps its accesses (written, or a va_list's
+    walk: dread.tidy stack_params left it) and needs nothing. Returns how many it declared volatile."""
+    stack = stack_words(text, fn.name)
+    if not stack:
+        return 0
+    taken = _address_taken(fn)
+    changed = {}
+    for i, (t, n) in enumerate(fn.params):
+        if i in stack and n not in taken:
+            q = _volatile_type(t)
+            if q is not None and q != t.strip():
+                changed[n] = q
+    if not changed:
+        return 0
+    fn.params = [(changed.get(n, t), n) for t, n in fn.params]
+    fn.head = _head_with(fn.head, fn.name, changed)
+    return len(changed)
+
+
+def argument_stores(lines, top, room=None):
+    """The functions whose failing cases in a round's output (lines, as dread.runner run writes them)
+    differ by a store the original does not make into the words above the stack top (memory 0x...: None
+    vs ...), where a case's stack arguments lie (dread.emu call; dread test never moves the stack): their
+    readable C wrote into its caller's frame (volatile_stack)."""
+    import re
+    from dread.emu import ARGS_ROOM
+    room = ARGS_ROOM if room is None else room
+    found, current = set(), None
+    if top is None:
+        return found
+    for text in lines:
+        for line in text.splitlines():
+            m = re.match(r"^FAIL (\S+) ", line)
+            if m:
+                current = m.group(1)
+                continue
+            if not line[:1].isspace():
+                current = None
+                continue
+            m = re.match(r"^\s+memory 0x([0-9a-fA-F]+): None vs ", line)
+            if m and current is not None and top <= int(m.group(1), 16) < top + room:
+                found.add(current)
+    return found
 
 
 def cdecl(tree, fn, text=None):
@@ -1839,6 +1992,7 @@ def verify_plan(program, context, lifter, names, flow, digests):
         _SCOPE = old
     full.plan.whole, full.plan.results = set(context.plan.whole), set(context.plan.results)
     full.plan.divcalls = set(context.plan.divcalls)
+    full.plan.volatile_params = set(context.plan.volatile_params)
     a, b = context.plan.to_json(), full.plan.to_json()
     parts = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
     names_ = sorted(n for n in again if digests.get(n) != again[n])
@@ -2056,15 +2210,37 @@ def check(target, image, names=None, out=print, jobs=None, verify=False):
         #   gizmo a32's handle_key took fmt_dec's % so.)
         # (Until 2026-10-24 the frame came first, also for a function that reached a failing callee; with
         # void functions failing in the first round, gizmo-m3's handle_key went whole for its callees'.)
+        # - Before all of these, a function whose cases differ by a store into the words of its stack
+        #   arguments that the original does not make (argument_stores), and whose readable C uses a
+        #   stack parameter as itself (dread.tidy stack_params), is tried once more with its stack
+        #   parameters volatile (volatile_stack, the readable_types table's volatile_params): the
+        #   compiler spilled into a dead parameter's word, the caller's frame. The store says so, so it
+        #   goes first (2026-10-28).
         culprits = {n for n in gone if not (reaches(n) & (gone - {n}))}
         again = {n: sorted(reaches(n) & (gone - {n})) for n in gone - culprits} if culprits else {}
         rest = gone - set(again)
         returned = returned_only(lines)
+        stored = argument_stores(lines, target.memory.stack_top)
+
+        def plain_stack(m):
+            """Whether m's readable C uses a stack parameter as itself (dread.tidy stack_params): a
+            stack argument of its lifted C (stack_words) still a parameter whose address the cleaned
+            tree no longer takes."""
+            text_ = texts.get(m)
+            stack = stack_words(text_, m) if text_ else set()
+            made = kept_cleaned(trees, context, m, text_) if stack else None
+            if made is None:
+                return False
+            params = lifted_params(text_, m) or []
+            words = {params[i] for i in stack if i < len(params)}
+            return bool({n for _, n in made[1].params if n in words} - _address_taken(made[1]))
+        volatiles = {n for n in rest if n in stored and n not in context.plan.volatile_params and plain_stack(n)}
+        rest_ = rest - volatiles
         if verify:
-            verify_framed(sorted(n for n in rest if n not in context.plan.whole and n in texts), texts, context,
+            verify_framed(sorted(n for n in rest_ if n not in context.plan.whole and n in texts), texts, context,
                           trees)
-        objects = {n for n in rest if n not in context.plan.whole and n in texts and framed(n, texts[n], context,
-                                                                                          trees)}
+        objects = {n for n in rest_ if n not in context.plan.whole and n in texts and framed(n, texts[n], context,
+                                                                                           trees)}
         divs = context.plan.divisions or {}
 
         def constant_divider(m):
@@ -2082,19 +2258,23 @@ def check(target, image, names=None, out=print, jobs=None, verify=False):
                     and program.by_name.get(m) is not None
                     and (lift.direct_callees(program, program.by_name[m]) & set(divs) or constant_divider(m))}
         divided = {}                        # name -> its own divisions, tried as calls first
-        for n in sorted(rest):
+        for n in sorted(rest_):
             mine = dividers({n})
             if mine:
                 divided[n] = mine
         late = {}                           # name -> the divisions its code reaches, tried as calls last
-        with_result = {n for n in rest if n in context.void and (n in returned or n not in objects)} - set(divided)
+        with_result = {n for n in rest_ if n in context.void and (n in returned or n not in objects)} - set(divided)
         whole = objects - with_result - set(divided)
         told = set()                        # (one line a function tried again, its first failure)
         for text in lines:
             for line in text.splitlines():
                 for name in gone:
                     if line.startswith(("FAIL %s " % name, "UNCOVERED %s:" % name)) and name in accepted:
-                        if name in divided:
+                        if name in volatiles:
+                            if name not in told:
+                                told.add(name)
+                                out("volatile %-24s %s" % (name, ("its stack parameters volatile: " + line)[:200]))
+                        elif name in divided:
                             if name not in told:
                                 told.add(name)
                                 out("calls    %-24s %s" % (name, ("its divisions as calls again: " + line)[:200]))
@@ -2127,6 +2307,8 @@ def check(target, image, names=None, out=print, jobs=None, verify=False):
                                     context.plan.divcalls -= back
         if whole:
             context.plan.whole |= whole         # (in context_key: the next round's readable C is made anew)
+        if volatiles:
+            context.plan.volatile_params |= volatiles   # (scoped: only their readable C is made anew)
         for n, whose in list(divided.items()) + list(late.items()):
             context.plan.divcalls |= whose      # (scoped: only their readable C is made anew)
             divfor.setdefault(n, set()).update(whose)
@@ -2136,14 +2318,16 @@ def check(target, image, names=None, out=print, jobs=None, verify=False):
             # void forms: made anew for what these functions and their callers print now (the check's whole
             # and results kept), else they lost their parameters' types. From the trees kept but theirs
             # (kept_trees), and the next round's builds make anew only the readable C whose entries changed
-            keep = (set(context.plan.whole), set(context.plan.results), set(context.plan.divcalls))
+            keep = (set(context.plan.whole), set(context.plan.results), set(context.plan.divcalls),
+                    set(context.plan.volatile_params))
             make_plan(program, context, lifter, lifted, flow, digests=digests, kept=trees)
             plans += 1
-            context.plan.whole, context.plan.results, context.plan.divcalls = keep
+            context.plan.whole, context.plan.results, context.plan.divcalls, context.plan.volatile_params = keep
             if verify:
                 verify_plan(program, context, lifter, lifted, flow, digests)
             shapes.store_plan(image, context.plan)
-        accepted = [n for n in accepted if n not in gone - whole - set(again) - with_result - set(divided) - set(late)]
+        accepted = [n for n in accepted if n not in gone - whole - set(again) - with_result - set(divided) - set(late) -
+                    volatiles]
         if not gone:
             break
     runs = target.scenarios and hasattr(program.arch, "reset")
@@ -2215,9 +2399,10 @@ def check(target, image, names=None, out=print, jobs=None, verify=False):
     accepted = accepted + by_system_run
     for name in accepted:
         verdicts[name] = ("readable", "")
-    if context.plan.whole or context.plan.results or context.plan.divcalls:
+    if context.plan.whole or context.plan.results or context.plan.divcalls or context.plan.volatile_params:
         context.plan.whole &= set(accepted)     # (results stay whole: their callers' readable C reads them)
         context.plan.divcalls &= set(accepted)
+        context.plan.volatile_params &= set(accepted)
         from dread import shapes
         shapes.store_plan(image, context.plan)  # (the functions whose frame is one object: the builds read it)
     os.makedirs(work, exist_ok=True)

@@ -5572,3 +5572,21 @@ segments), so nothing the emulator adds is needed. The descriptors have their ac
 loading a segment writes nothing into flash (QEMU sets a clear one, as the core does). The image
 grew by the GDT, the IDT's gate code and irq_entry; the tests that named gizmo-i386's addresses
 in lifted text match without them now.
+
+## A stack parameter whose word the readable C wrote becomes volatile on a retry (2026-10-28)
+
+**Decided by recommendation.** Used as itself (dread.tidy stack_params, since 2026-10-27), a stack
+parameter's incoming word is the compiler's to spill into once the parameter is dead: a store into the
+caller's frame the original never makes, which the cases see and the gate refuses (GCC -O2 on the IA32
+FreeRTOS build; a private firmware). A volatile parameter lives in its word, so nothing is spilled there.
+
+- **Every such parameter volatile, always:** no function fails for it, but every head with stack
+  parameters says volatile, which tells a reader nothing about the source.
+- **The accesses back** (stack_params left out for the function): as before 2026-10-27, proven, but
+  the parameter loses its type and its structure (x86's pointers took none so).
+- **Taken: volatile on a retry** (dread.readable volatile_stack, the readable_types table's
+  volatile_params), for a function whose cases differ by a store the original does not make into the
+  words above the stack top, where a case's stack arguments lie (argument_stores). The store says what
+  went wrong, so this retry comes first. What could still go wrong: such a store for another reason (a
+  sibling call that passes stack arguments writes the caller's words too, and no qualifier stops it):
+  the function fails once more and goes on to the other retries, one round later than before.

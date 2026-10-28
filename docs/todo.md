@@ -6721,12 +6721,37 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         parameter need not make: vTaskDelay on the GCC -O2 build stored nothing there as readable C
         ("memory 0x1d0000: 33 vs None"; readable in the afternoon's bench, lifted in the evening's
         measurement). tests/test_tidy.py: sa2, written.
-      - [ ] A stack parameter used as itself lets GCC reuse its word (found 2026-10-27): no longer
+      - [x] A stack parameter used as itself lets GCC reuse its word (found 2026-10-27): no longer
         addressable, a parameter's incoming word is GCC's to spill into once the parameter is dead, and
         xEventGroupWaitBits's readable C on the GCC -O2 build stores sa1's value into sa3's word (mov
         [ebp + 0x14], ebx), a store the original never makes, so the gate keeps it lifted. Declaring a
         parameter so used volatile (volatile u32 sa3: its reads and writes the word's, as the original's)
         would keep the word; the types pass, which rewrites parameter types, has to keep the qualifier.
+        Since 2026-10-28 (dread.readable volatile_stack, decisions.md): a function whose cases differ by a
+        store the original does not make into the words above the stack top, where a case's stack
+        arguments lie (argument_stores), is tried once more with the stack parameters its readable C uses
+        as themselves volatile (the readable_types table's volatile_params), first of the retries, since
+        the store says what went wrong; elsewhere the parameters stay plain. The qualifier goes on after
+        the types and the names, before the cdecl step, by the parameters' places in the lifted head (the
+        names change, and the passes before it drop only trailing parameters), and keeps the type:
+        ReadMultipleByte on the IA32 GCC -O2 build, which stored into its second argument's word (memory
+        0x1d0004: None vs 16), is readable as u32 ReadMultipleByte(u32 eax, volatile u32 sa0, volatile u8
+        *volatile sa1, volatile u32 sa2, volatile u32 sa3): 229 -> 230 of 231, in as many rounds; GCC -Os
+        (256 of 257) and clang (236 of 236) unchanged, no function of theirs retried; nor any on six ARM
+        and RISC-V builds (Cortex-M GCC 12 -Os and -O2, GCC 14 -O2, clang 16 -Os and clang -O2, RISC-V
+        GCC -O2), so readable there as with main. The private real-life test's regression from the
+        stack parameters is readable again with it. tests/test_readable.py: the
+        qualifier and the store's signature; tests/test_x86.py: the retry end to end, a stand-in making
+        the spill (the compiler's choice, which changes with its version).
+      - [ ] GCC 11 drops a volatile store into a parameter's own word right before the return (found
+        2026-10-28 in CI's ubuntu-22.04 container, by the test above's first stand-in: *(volatile u32 *)
+        (u32)&sa0 = 0x5a5a5a5au; return d0 + sa1; compiled to no store at all; GCC 13 and 16 keep it):
+        the object is a parameter, not volatile, and its life ends at the return. The lifters write an
+        original's store into its argument word the same way (dread.tidy stack_params keeps those
+        accesses), so built by GCC 11 such a function could lose the store, which the comparison sees: a
+        function refused or dropped, not a wrong result kept. Not seen on a target yet; a test on CI's
+        older runner would tell. A way, if it shows: the parameter itself volatile where the function
+        writes it, as volatile_stack does for a spill.
       - [x] x86's pointers became word arrays, not structures: uxListRemove's sa0 was volatile u32 * with
         sa0[1], sa0[2], sa0[4], where ARM's r0 is a struct s_15 * with r0->f_4, f_8, f_10. The cause
         (2026-10-27): x86's lifter writes an access's address inside an integer cast, *(volatile u32 *)((u32)

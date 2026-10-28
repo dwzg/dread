@@ -2007,6 +2007,8 @@ class Plan:
         self.global_pointers = None     # address -> structure: words at fixed addresses holding its pointer
         self.divisions = None           # function -> [sign, results, order]: routines that divide (dread.divisions)
         self.divcalls = set()           # functions whose calls of those stay calls (the check: their / and % failed)
+        self.volatile_params = set()    # functions whose stack parameters are volatile (the check: their words
+                                        # were written, dread.readable volatile_stack)
 
     def to_json(self):
         out = {"version": 1, "structs": {n: [list(r) for r in rows] for n, rows in sorted(self.structs.items())},
@@ -2043,6 +2045,8 @@ class Plan:
             out["divisions"] = {f: list(k) for f, k in sorted(self.divisions.items())}
         if self.divcalls:
             out["divcalls"] = sorted(self.divcalls)
+        if self.volatile_params:
+            out["volatile_params"] = sorted(self.volatile_params)
         if self.results:
             out["results"] = sorted(self.results)
         if self.signed is not None:
@@ -2078,6 +2082,7 @@ class Plan:
         p.masks = {f: list(ix) for f, ix in data["masks"].items()} if "masks" in data else None
         p.divisions = {f: list(k) for f, k in data["divisions"].items()} if "divisions" in data else None
         p.divcalls = set(data.get("divcalls", []))
+        p.volatile_params = set(data.get("volatile_params", []))
         p.results = set(data.get("results", []))
         p.signed = {(int(a, 16), z) for a, sizes in data["signed"].items() for z in sizes} if "signed" in data \
             else None

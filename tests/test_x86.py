@@ -1583,6 +1583,66 @@ def test_a_cdecl_function_passes_the_gate_with_callers_that_hand_it_eax(tmp_path
     assert readable.CDECL + "u32 scaled(" in built and "eax_in" not in built and "regparm 1" in built, built
 
 
+
+WEIGH_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+
+__attribute__((noinline)) u32 weigh(u32 n, u32 k)
+{
+    return n * 3u + k;
+}
+
+void _start(void)
+{
+    sink[0] = weigh(sink[1], sink[2]);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_store_into_a_stack_arguments_word_makes_the_parameters_volatile(tmp_path, monkeypatch):
+    """A function whose cases differ by a store into its stack arguments' words is tried once more with
+    its stack parameters volatile (dread.readable volatile_stack, the readable_types table's
+    volatile_params): used as itself, a stack parameter's word is the compiler's to spill into once the
+    parameter is dead, a store into the caller's frame the original never makes (GCC -O2 on the IA32
+    FreeRTOS build, xEventGroupWaitBits; on a private firmware too). The spill is the
+    compiler's choice, so a stand-in makes it here: weigh's readable C gets a store into its first
+    stack parameter's word while its parameters are not volatile, an asm statement that writes the
+    parameter's memory (GCC 11 compiled a volatile store through its address, *(volatile u32 *)(u32)&sa0
+    = ..., right before the return to nothing; GCC 13 and 16 keep it). The first round fails it with
+    that store, the second takes it with volatile u32 parameters, and the table lists it."""
+    target = small_i386(tmp_path, WEIGH_C, "spill")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import cparse as C, lift, readable
+    image = target.image()
+    lines = []
+    assert lift.check(target, image, ["weigh"], out=lines.append, jobs=2) == ["weigh"], lines
+    real = readable.cdecl
+
+    def spilling(tree, fn, text=None):
+        changed = real(tree, fn, text)
+        if fn.name == "weigh" and "volatile" not in fn.head:
+            lifted = readable.lifted_params(text, fn.name)
+            stack = [lifted[i] for i in sorted(readable.stack_words(text, fn.name))]
+            first = next(n for _, n in fn.params if n in stack)
+            made = C.parse('void f_(u32 %s) { __asm__ volatile ("movl $0x5a5a5a5a, %%0" : "=m"(%s)); }' % (first, first))
+            store = next(item for item in made.items if isinstance(item, C.Function)).body.body[0]
+            fn.body.body.insert(len(fn.body.body) - 1, store)
+        return changed
+    monkeypatch.setattr(readable, "cdecl", spilling)
+    lines = []
+    assert readable.check(target, image, out=lines.append, jobs=2) == ["weigh"], lines
+    said = "\n".join(lines)
+    assert "volatile weigh" in said, said
+    built = (tmp_path / "spill" / "build" / "readable-check" / "main" / "lifted" / "weigh.c").read_text()
+    assert "volatile u32 sa0" in built and "5a5a5a5a" not in built, built
+    import json
+    assert json.load(open(image.table("readable_types"))).get("volatile_params") == ["weigh"]
+
+
 def test_the_layer_takes_values_apart():
     """The x86 layer's hooks for dread.uncovered, dread.relations and dread.statics: value_step gives an
     access at a fixed address with base 0 (absolute_accesses) and none at an unknown base, values for

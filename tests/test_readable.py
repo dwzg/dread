@@ -1206,3 +1206,66 @@ def test_a_wrapped_body_keeps_its_parameters_as_declared():
     assert "*(volatile u32 *)more = byte;" in out and "more->" not in out and "*more" not in out, out
     assert "u32 a3, u32 more)\n{" in out and "u32 h_dread_body(u32 a0, u32 a1, u32 a2, u32 a3, u32 more);" in out, out
     assert "src[1]" in out or "*(src + 1)" in out or "src = (const volatile u8 *)a1" in out, out
+
+
+STACKED_LIFTED = r"""
+#include "dread.h"
+u32 f(u32 r0, u32 r1, u32 r2, u32 r3, u32 s0, u32 s1, u32 s2)
+{
+    u32 r4;
+    r4 = *(volatile u32 *)((u32)&s1);
+    r0 = *(volatile u32 *)((u32)&s0) + *(volatile u32 *)((u32)&s2) + r4;
+    return r0;
+}
+"""
+
+STACKED_READABLE = r"""
+u32 f(u32 mode, u32 a, u32 b, u32 c, u32 count, const u32 *table, u32 s2)
+{
+    u32 i, sum = mode;
+    for (i = 0; i < count; i++)
+        sum += table[i] ^ *(volatile u32 *)((u32)&s2);
+    return sum + a + b + c;
+}
+"""
+
+
+def test_stack_parameters_used_as_themselves_become_volatile():
+    """dread.readable volatile_stack, for a function the check's cases rejected for a store into its
+    stack arguments' words: the stack parameters the readable C uses as themselves are declared
+    volatile, so that the compiler keeps each in its word and spills nothing there (once a parameter is
+    dead, its word is the compiler's to spill into: a store into the caller's frame). Which
+    parameters are the stack arguments the lifted C says: those it reads through their address, by
+    their place in the head (the names changed since). A pointer is qualified itself, not what it
+    points to; one whose address the readable C still takes (s2: written, or walked) keeps its accesses
+    and needs nothing; the register parameters stay as they are."""
+    tree = cparse.parse(STACKED_READABLE)
+    fn = tree.function("f")
+    assert readable.stack_words(STACKED_LIFTED, "f") == {4, 5, 6}
+    assert readable.volatile_stack(fn, STACKED_LIFTED) == 2
+    out = cparse.unparse(tree, notes=False)
+    assert "u32 f(u32 mode, u32 a, u32 b, u32 c, volatile u32 count, const u32 *volatile table, u32 s2)" in out, out
+    assert [t for t, _ in fn.params][4:6] == ["volatile u32", "const u32 *volatile"]
+    assert readable.volatile_stack(fn, STACKED_LIFTED) == 0          # (once is enough)
+    assert readable._volatile_type("struct s_3 *") == "struct s_3 *volatile"
+    assert readable._volatile_type("u32 (*)(u32)") is None
+    plain = cparse.parse(STACKED_READABLE)
+    assert readable.volatile_stack(plain.function("f"), "u32 f(u32 r0)\n{\n    return r0;\n}\n") == 0
+
+
+def test_a_store_into_the_stack_arguments_words_is_told_apart():
+    """dread.readable argument_stores: the functions whose failing cases in a round's output differ by a
+    store the original does not make into the words above the stack top, where a case's stack arguments
+    lie; not a store below it (the function's own frame) nor a store of the original's that the
+    readable C lacks."""
+    lines = ["FAIL f [generated 3]\n     memory 0x1004: None vs 4\n     memory 0x1005: None vs 0",
+             "FAIL g [generated 0]\n     memory 0xffc: None vs 1",
+             "FAIL h [written 0]\n     memory 0x1008: 7 vs None",
+             "ok       k",
+             "     memory 0x1000: None vs 2"]
+    assert readable.argument_stores(lines, 0x1000) == {"f"}
+    assert readable.argument_stores(lines, None) == set()
+    from dread import shapes
+    plan = shapes.Plan()
+    plan.volatile_params = {"f"}
+    assert shapes.Plan.from_json(plan.to_json()).volatile_params == {"f"}
