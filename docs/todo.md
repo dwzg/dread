@@ -6901,10 +6901,23 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
           writes of end of interrupt, and there it waits for the HPET's counter to move (every device
           read answers 0 without models). tests/test_x86.py: a startup that checks the same, with and
           without [boot]; a countdown longer than QUIET, with and without quiet.
-        - [ ] The devices the demo's boot and tick need, as models: the Quark's UART (a PCI device: its
-          registers through the base address the configuration space at 0xe0000000 holds), the HPET
-          (0xfed00000), the local APIC (0xfee00000: end of interrupt, the error and spurious vectors) and
-          the I/O APIC (0xfec00000), as far as the run shows each needed.
+        - [ ] The devices the demo's boot and tick need, as models, as far as the run shows each needed:
+          - [x] The configuration space and the UART (2026-10-28): a regs model (dread.models.regs:
+            configured words, every other one a default, stores kept) for the configuration space at
+            0xe0000000 with the UART's base address at 0xe00a5010 (bus 0, device 20, function 5, BAR0),
+            the uart model there as a 16550 at a stride of four (data 0x0, line status 0x14, its divisor
+            latch through lcr 0xc: models.uart lcr). The demo finds and sets up its UART, reads the I2C
+            controller (0xe00aa000) as absent, and programs the HPET.
+          - [ ] Port I/O in the system run: x86's in and out to models that own ports (dread.emu has a
+            port space for cases; the system run has none, dread.arch.x86's "Not yet"). uiCalibrateTimer
+            times a one-shot of the PIT's channel 2 (ports 0x43, 0x42: about 10 ms) by polling port
+            0x61's bit 5, and there the run waits now (in reads 0).
+          - [ ] The PIT's channel 2 and port 0x61, as far as that calibration needs.
+          - [ ] The HPET (0xfed00000): the main counter from the shared clock, timer 0's comparator and
+            its interrupt (routed to the I/O APIC's input 2).
+          - [ ] The local APIC (0xfee00000: its timer, which the calibration reads and FreeRTOS's tick
+            uses, end of interrupt, the error and spurious vectors) and the I/O APIC (0xfec00000: the
+            redirection the demo writes), delivering vectors through the IDT.
         - [ ] Scenarios: to the demo's first lines on the serial port and a few ticks; then the lift
           check's system phase on the tasks and the handlers, and the measurement.
       - [ ] prvTimerTask's loop cases (both -Os bench builds: "only 0 of 100 generated inputs ran to the

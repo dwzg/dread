@@ -42,7 +42,7 @@ is safe to run on hardware.
 | Cortex-M4F (FPv4-SP, DSP) | m4 44 / 58 | 2 | done |
 | RISC-V (RV32IMC) | rv32 32 / 47 · rv32cpp 39 / 58 | 11 | done |
 | MSP430 | msp430 79 / 130 | 1 | paused · `██████░░░░` 12 of 19 steps |
-| x86, 32-bit (i386) | i386 – / 47 · i386clang – / 47 | 3 | `████████░░` 50 of 65 steps |
+| x86, 32-bit (i386) | i386 – / 47 · i386clang – / 47 | 3 | `███████░░░` 51 of 70 steps |
 | MIPS32 | mips – / 47 | – | paused |
 | AArch64 | – | – | planned |
 | PowerPC 32 | – | – | planned |
@@ -65,7 +65,7 @@ Gizmo (`examples/gizmo`) is DREAD's own test firmware, built for each architectu
 | [Browser view](docs/todo.md#browser-view-dread-gui-asked-for-by-the-user-on-2026-10-18) | `████████░░` | 5 of 6 |
 | [A realistic benchmark: FreeRTOS](docs/todo.md#a-realistic-benchmark-freertos-asked-for-by-the-user-2026-10-19-before-the-rest-of-msp430) | `████████░░` | 12 of 16 |
 | [MSP430](docs/todo.md#msp430-of-special-interest-to-the-user-right-after-risc-v) | `██████░░░░` | 12 of 19 |
-| [More architectures](docs/todo.md#more-architectures-each-a-gizmo-build-with-clang-the-arch-layer-every-tool-on-it) | `███████░░░` | 50 of 73 |
+| [More architectures](docs/todo.md#more-architectures-each-a-gizmo-build-with-clang-the-arch-layer-every-tool-on-it) | `███████░░░` | 51 of 78 |
 | [Floating point](docs/todo.md#floating-point) | `░░░░░░░░░░` | 0 of 1 |
 | [More compilers](docs/todo.md#more-compilers) | `░░░░░░░░░░` | 0 of 6 |
 | [Scale and robustness](docs/todo.md#scale-and-robustness) | `████░░░░░░` | 4 of 9 |
