@@ -1085,8 +1085,24 @@ class X86:
         return False
 
     def system_exception(self, intno):
-        """No system call is modelled (int 0x80 and sysenter are faults of the run)."""
-        return None
+        """A software interrupt (int N, a vector from 32 on: no exception of the core's has one) is a
+        trap the layer takes itself (enter_syscall); the core's own exceptions (0 to 31: a divide
+        error, a general protection fault) are faults of the run, and so is sysenter."""
+        return "syscall" if intno >= 32 else None
+
+    def enter_syscall(self, engine, resume, read_word, write_word):
+        """int N taken as the core takes it: through the IDT's gate N (enter_interrupt with N as its
+        cause), returning behind the instruction (int imm8, cd N). FreeRTOS's IA32 port yields so (int
+        0x20, vPortYieldCall). resume is where Unicorn left eip: behind the int, or on it."""
+        here = bytes(engine.mem_read(resume, 2))
+        if here[0] == 0xCD:                 # (eip on the int itself)
+            vector, resume = here[1], resume + 2
+        else:
+            before = bytes(engine.mem_read(resume - 2, 2))
+            if before[0] != 0xCD:
+                raise ValueError("x86: a software interrupt with no int in front of 0x%x" % resume)
+            vector = before[1]
+        return self.enter_interrupt(engine, None, resume, None, read_word, write_word, cause=vector)
 
     def exception_return(self, engine, read_word):
         """Nothing to finish: iret runs in the emulator."""

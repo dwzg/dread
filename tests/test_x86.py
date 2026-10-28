@@ -1871,6 +1871,46 @@ def test_the_system_runs_port_space(tmp_path):
     assert outcome.reports["port"] == {"seen": [0x5a]}
 
 
+
+SOFTINT_C = r"""
+__asm__(".text\n.globl _start\n.type _start, @function\n_start:\n"
+        "    lgdt gdt_desc\n    ljmp $0x08, $0f\n"
+        "0:  movl $0x10, %eax\n    movl %eax, %ds\n    movl %eax, %es\n    movl %eax, %ss\n"
+        "    movl $0x20010000, %esp\n"
+        "    movl $handler, %eax\n    movl $idt + 8 * 0x30, %edx\n    movw %ax, 0(%edx)\n"
+        "    movw $0x08, 2(%edx)\n    movw $0x8e00, 4(%edx)\n    shrl $16, %eax\n    movw %ax, 6(%edx)\n"
+        "    lidt idt_desc\n"
+        "    movl $1, 0x40000000\n    int $0x30\n    movl $3, 0x40000000\n"
+        "1:  jmp 1b\n.size _start, .-_start\n"
+        ".globl handler\n.type handler, @function\nhandler:\n    movl $2, 0x40000000\n    iret\n"
+        ".size handler, .-handler\n"
+        ".section .rodata\n.p2align 3\ngdt:\n    .quad 0\n    .quad 0x00cf9b000000ffff\n    .quad 0x00cf93000000ffff\n"
+        "gdt_desc:\n    .word gdt_desc - gdt - 1\n    .long gdt\n"
+        "idt_desc:\n    .word 8 * 0x31 - 1\n    .long idt\n"
+        ".section .bss\n.p2align 3\nidt:\n    .space 8 * 0x31\n");
+"""
+
+
+def test_a_software_interrupt_goes_through_the_idt(tmp_path):
+    """x86's int N in the system run (dread.arch.x86 system_exception, enter_syscall): taken through
+    the IDT's gate N as the core takes it, the handler's iret coming back behind the int. FreeRTOS's
+    IA32 port yields with int 0x20; until 2026-10-28 the system run stopped there ("CPU exception 32").
+    This startup loads a flat GDT and an IDT with a gate for 0x30, writes 1 to a device word, raises
+    int 0x30 (its handler writes 2) and writes 3."""
+    target = small_i386(tmp_path, SOFTINT_C, "softint")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import sysrun
+    from dread.target import Target
+    toml = tmp_path / "softint" / "dread.toml"
+    toml.write_text(toml.read_text().replace("sentinel = ", "io = [[0x40000000, 0x40001000]]\nsentinel = "))
+    target = Target.load(str(toml))
+    image = target.image()
+    outcome = sysrun.run_image(target, image, image.payload(), {"limit": 100000})
+    written = [e[4] for e in outcome.log if e[0] == "write"]
+    assert written == [1, 2, 3], (written, outcome.how)
+
+
 def test_the_layer_takes_values_apart():
     """The x86 layer's hooks for dread.uncovered, dread.relations and dread.statics: value_step gives an
     access at a fixed address with base 0 (absolute_accesses) and none at an unknown base, values for

@@ -6948,8 +6948,13 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
             expanders, programs the local APIC's timer (periodic, vector 0x21) and starts its tasks: 95
             functions entered, until prvTimerTask yields with int 0x20, which the system run stops at
             ("CPU exception 32"): software interrupts through the IDT are next.
-          - [ ] x86's int N in the system run, taken through the IDT's gate as the core takes it (the
+          - [x] x86's int N in the system run, taken through the IDT's gate as the core takes it (the
             port's yield: int 0x20), where the run now stops for any exception the core raises but svc.
+            dread.arch.x86 system_exception and enter_syscall (2026-10-28): a vector from 32 on is a
+            software interrupt, entered through its gate (enter_interrupt), back behind the int with
+            iret; the core's own exceptions stay faults. With it the demo runs to the run's limit: 141
+            functions entered, its check task prints "Starting task check loop - Please wait for a status
+            update." and "No task errors encountered." No timer interrupt comes yet (no APIC model).
           - [ ] The local APIC (0xfee00000: its timer, which the calibration reads and FreeRTOS's tick
             uses, end of interrupt, the error and spurious vectors) and the I/O APIC (0xfec00000: the
             redirection the demo writes), delivering vectors through the IDT.
