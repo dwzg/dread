@@ -6955,9 +6955,21 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
             iret; the core's own exceptions stay faults. With it the demo runs to the run's limit: 141
             functions entered, its check task prints "Starting task check loop - Please wait for a status
             update." and "No task errors encountered." No timer interrupt comes yet (no APIC model).
-          - [ ] The local APIC (0xfee00000: its timer, which the calibration reads and FreeRTOS's tick
+          - [x] The local APIC (0xfee00000: its timer, which the calibration reads and FreeRTOS's tick
             uses, end of interrupt, the error and spurious vectors) and the I/O APIC (0xfec00000: the
-            redirection the demo writes), delivering vectors through the IDT.
+            redirection the demo writes), delivering vectors through the IDT. dread.models.apic
+            (2026-10-28): one controller, vectors delivered while their class lies above the task
+            priority's and every vector in service, nothing before the spurious vector's enable bit.
+            With the PC's own ratios (the local APIC's input 1 unit a count, the HPET 28, the PIT 335:
+            2.5, 69.8 and 838 ns), the demo takes its tick (vector 0x21) and the HPET's interrupts (0x32,
+            0x85, 0x95) and enters 181 functions (200 million units in 5 s), until about 150 million
+            units: from there it loops in xTaskResumeAll's moving of the pending-ready list (the list's
+            count at 0x1903dc never reaching 0) inside its critical section (the task priority 0xaf,
+            every interrupt held back), called from vQueueReceiveWhenSuspendedTask. An inconsistent list:
+            not traced yet whether a model's semantics or the emulation leads the demo there.
+          - [ ] Why the pending-ready list goes inconsistent (above), then scenarios: the demo's lines on
+            the serial port and a few seconds of ticks, its [boot], models and scenario in the bench
+            recipe, and the lift check's system phase on the tasks.
         - [ ] Scenarios: to the demo's first lines on the serial port and a few ticks; then the lift
           check's system phase on the tasks and the handlers, and the measurement.
       - [ ] prvTimerTask's loop cases (both -Os bench builds: "only 0 of 100 generated inputs ran to the

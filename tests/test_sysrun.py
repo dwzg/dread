@@ -2432,3 +2432,62 @@ def test_a_designware_i2c_controller_with_register_devices():
     i2c.write(b + 0x10, 4, 0x200 | 1)
     assert i2c.read(b + 0x34, 4) == (1 << 6) | (1 << 9)
     assert i2c.read(b + 0x40, 4) == 0 and i2c.read(b + 0x34, 4) == 0
+
+
+def test_the_local_and_io_apic():
+    """dread.models.apic: the local APIC's timer as FreeRTOS's IA32 port ticks on it (periodic, vector
+    0x21, the divider by 16) requesting its vector every initial count * 16 * rate units, taken while
+    the task priority's class lies below it and no vector of its class is in service, ended by end of
+    interrupt; the I/O APIC's redirection of a device's line (an edge entry asks on each rising edge,
+    a level one again behind its end of interrupt while the line stays high); nothing delivered before
+    the spurious vector's enable bit."""
+    from dread.models import create
+
+    class System:
+        clock = 0
+
+        def interrupts_changed(self):
+            pass
+    system = System()
+    apic = create(system, "apic", {"kind": "apic", "base": 0xfee00000, "ioapic": 0xfec00000, "rate": 1}, ".")
+    l, io = 0xfee00000, 0xfec00000
+    assert apic.read(l + 0x30, 4) == 0x00050014
+    apic.write(l + 0x320, 4, 0x20021)
+    apic.write(l + 0x3e0, 4, 3)
+    apic.write(l + 0x380, 4, 100)
+    assert apic.next_event() == 1600
+    system.clock = 800
+    assert apic.read(l + 0x390, 4) == 50
+    system.clock = 1600
+    apic.event(1600)
+    assert apic.pending_interrupt() is None             # (the APIC not enabled yet)
+    apic.write(l + 0xf0, 4, 0x1ff)
+    assert apic.pending_interrupt() == 0x21 and apic.next_event() == 3200
+    apic.write(l + 0x80, 4, 0x2f)
+    assert apic.pending_interrupt() is None             # (the task priority's class blocks it)
+    apic.write(l + 0x80, 4, 0)
+    apic.taken(0x21)
+    assert apic.pending_interrupt() is None and apic.read(l + 0x100 + 0x10, 4) == 1 << 1
+    apic.write(l + 0xb0, 4, 0)
+    assert apic.read(l + 0x110, 4) == 0
+    apic.write(io, 4, 0x14)
+    apic.write(io + 0x10, 4, 0x32)                      # (entry 2: vector 0x32, edge)
+    apic.line(2, True)
+    assert apic.pending_interrupt() == 0x32
+    apic.taken(0x32)
+    apic.write(l + 0xb0, 4, 0)
+    apic.line(2, True)                                  # (still high: no new edge)
+    assert apic.pending_interrupt() is None
+    apic.line(2, False)
+    apic.line(2, True)
+    assert apic.pending_interrupt() == 0x32
+    apic.taken(0x32)
+    apic.write(l + 0xb0, 4, 0)
+    apic.write(io, 4, 0x16)
+    apic.write(io + 0x10, 4, 0x8033)                    # (entry 3: vector 0x33, level)
+    apic.line(3, True)
+    apic.taken(0x33)
+    apic.write(l + 0xb0, 4, 0)
+    assert apic.pending_interrupt() == 0x33             # (the line is still high)
+    apic.write(io, 4, 1)
+    assert apic.read(io + 0x10, 4) == 0x170020
