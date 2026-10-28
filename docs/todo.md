@@ -6640,6 +6640,19 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         register for its caller, which no attribute writes for a plain function. tests/test_x86.py:
         irq_entry through the lift check; the port's two shapes lifted and compiled, a stack switch and a
         pushal with ret refused.
+      - [x] A switch bounded by a compare of memory (2026-10-28): GCC switches over a stack argument by
+        comparing its word and loading it behind the compare, cmp dword ptr [ebp + 0x14], 4; ja; mov eax,
+        dword ptr [ebp + 0x14]; jmp dword ptr [eax*4 + table] (xTaskGenericNotify and its FromISR form on
+        GCC -Os; prvTimerTask on -O2 with a store to a global between the compare and the ja), and
+        dread.arch.x86 bound_check took no compare of memory: "jumps through a register or memory to
+        targets not known". The load is the bound check now (_bounded_load: the index in its register from
+        there, set behind it; what lies between writes neither the operand's registers nor memory other
+        than at a fixed address, nor branches, nor between the compare and the branch the flags). On copies
+        of the bench builds: GCC -Os 257 -> 258 accepted (xTaskGenericNotify), its FromISR form lifts and
+        is dropped for 17 instructions its cases miss; GCC -O2 as before (231), prvTimerTask lifts and is
+        dropped for coverage (the loop cases item below); clang as before. tests/test_x86.py: pick, a
+        table jump over a stack argument with a store to a global in front of the ja, accepted; pick2,
+        a store through a register there, refused.
       - [x] dread.fragile saves_touched took an argument passed from a callee-saved register for a saved
         register (found and corrected 2026-10-27): vTaskSuspend passes uxListRemove its argument with push
         esi, and uxListRemove reading it (mov eax, [esp + 8]) was "a read of the saved esi; a length past
@@ -6872,7 +6885,8 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         xSecondTimerHandler; clang: xFirstTimerHandler instead of the last); all six pass the lift check now.
         tests/test_x86.py: callit.
       - [ ] prvTimerTask's loop cases (both -Os bench builds: "only 0 of 100 generated inputs ran to the
-        end"): the stub of xQueueReceive fills the received message with the loop frame's bytes (96 on x86
+        end"; on -O2 it lifts since its switch's bound check is known, 2026-10-28, and misses 189 of 279
+        instructions): the stub of xQueueReceive fills the received message with the loop frame's bytes (96 on x86
         against 48 on ARM); with a negative message ID the task calls through the message's callback pointer
         (call dword ptr [ebp - 0x24]), with another it reads through its timer pointer (cmp dword ptr
         [edi + 0x14], 0), and every input faults. ARM's GCC build gets 30 loop cases through the

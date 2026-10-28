@@ -1690,6 +1690,64 @@ def test_an_argument_word_the_function_writes_is_volatile_in_its_head(tmp_path):
     assert sorted(readable.check(target, image, out=lines.append, jobs=2)) == ["bump", "weigh"], lines
 
 
+
+MEMSWITCH_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+u32 pick(u32 a, u32 k);
+u32 pick2(u32 a, u32 k);
+__asm__(".text\n.globl pick\n.type pick, @function\npick:\n"
+        "    pushl %ebp\n    movl %esp, %ebp\n"
+        "    cmpl $3, 0xc(%ebp)\n    movl %ebp, sink + 8\n    ja .Lnone\n    movl 0xc(%ebp), %eax\n"
+        "    jmp *.Ltable(, %eax, 4)\n"
+        ".Lone:  movl 8(%ebp), %eax\n    addl $1, %eax\n    popl %ebp\n    ret\n"
+        ".Ltwo:  movl 8(%ebp), %eax\n    shll $1, %eax\n    popl %ebp\n    ret\n"
+        ".Lthree:  movl 8(%ebp), %eax\n    xorl $5, %eax\n    popl %ebp\n    ret\n"
+        ".Lfour:  movl 8(%ebp), %eax\n    subl $7, %eax\n    popl %ebp\n    ret\n"
+        ".Lnone:  xorl %eax, %eax\n    popl %ebp\n    ret\n"
+        ".size pick, .-pick\n"
+        ".globl pick2\n.type pick2, @function\npick2:\n"
+        "    pushl %ebp\n    movl %esp, %ebp\n    movl 8(%ebp), %ecx\n"
+        "    cmpl $3, 0xc(%ebp)\n    movl %ecx, (%ecx)\n    ja .Lnone2\n    movl 0xc(%ebp), %eax\n"
+        "    jmp *.Ltable2(, %eax, 4)\n"
+        ".Lfive:  movl $5, %eax\n    popl %ebp\n    ret\n"
+        ".Lsix:  movl $6, %eax\n    popl %ebp\n    ret\n"
+        ".Lnone2:  xorl %eax, %eax\n    popl %ebp\n    ret\n"
+        ".size pick2, .-pick2\n"
+        ".section .rodata\n.p2align 2\n.Ltable:  .long .Lone, .Ltwo, .Lthree, .Lfour\n"
+        ".Ltable2:  .long .Lfive, .Lsix, .Lfive, .Lsix\n.text\n");
+
+void _start(void)
+{
+    sink[0] = pick(sink[1], sink[2]) + pick2((u32)&sink[3], sink[2]);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_switch_bounded_by_a_compare_of_memory(tmp_path):
+    """GCC 12 -Os switches over a stack argument by comparing the argument's word and loading it
+    behind the compare: cmp dword ptr [ebp + 0xc], 3; ja; mov eax, dword ptr [ebp + 0xc]; jmp dword
+    ptr [eax*4 + table] (FreeRTOS's xTaskGenericNotify and its FromISR form on the IA32 bench build).
+    The load is the bound check (dread.arch.x86 _bounded_load): the index is in eax from there, the
+    lifter switches over it, and the lift check accepts pick, every case of its table run; a store to
+    a global between the compare and the ja (GCC -O2's prvTimerTask) changes nothing. pick2 stores
+    through a register there, which may be the compared word: no bound check, refused as before. Until
+    2026-10-28 a compare of memory was no bound check, and the jump went to targets not known."""
+    target = small_i386(tmp_path, MEMSWITCH_C, "pick")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import build, lift
+    image = target.image()
+    lines = []
+    assert lift.check(target, image, ["pick", "pick2"], out=lines.append, jobs=2) == ["pick"], lines
+    assert any(line.startswith("refused  pick2") and "targets not known" in line for line in lines), lines
+    build.lift_sources(target, image, ["pick"], str(tmp_path / "one"), quiet=True)
+    text = (tmp_path / "one" / "pick.c").read_text()
+    assert "    index = eax;" in text and "switch (index) { case 0: goto L_" in text and "case 3: goto L_" in text, text
+
+
 def test_the_layer_takes_values_apart():
     """The x86 layer's hooks for dread.uncovered, dread.relations and dread.statics: value_step gives an
     access at a fixed address with base 0 (absolute_accesses) and none at an unknown base, values for

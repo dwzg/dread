@@ -419,10 +419,14 @@ class X86:
         imm + 1 values pass, the ja behind it leaves for the rest; set before the compare: GCC's cmp
         eax, 6; ja in front of its jump through the table), or and r, 2^n - 1 (r takes 0 .. 2^n - 1;
         set after the and: clang's and eax, 7 in front of a jump through an eight-entry table that no
-        compare guards). A byte or word register stands for its whole register. None otherwise: a
-        compare of memory (the index is loaded behind it), a bound held in a register (known is not
-        used: the compare sits in front of the jump, which a value set there would not change)."""
+        compare guards), or a load of the word such a compare of memory bounded (_bounded_load). A byte
+        or word register stands for its whole register. None otherwise: a bound held in a register
+        (known is not used: the compare sits in front of the jump, which a value set there would not
+        change)."""
         ops = insn.operands
+        loaded = self._bounded_load(insn, prior)
+        if loaded is not None:
+            return loaded
         if insn.mnemonic not in ("cmp", "and") or len(ops) != 2 or ops[1].type != X.X86_OP_IMM:
             return None
         reg = self._reg_operand(insn, ops[0])
@@ -433,6 +437,59 @@ class X86:
             return reg, imm, True
         if insn.mnemonic == "and" and 0 < imm < 0x10000 and imm & (imm + 1) == 0:
             return reg, imm, False
+        return None
+
+    BOUNDED_LOAD_BACK = 6   # instructions searched in front of a load for the compare that bounds it
+
+    def _bounded_load(self, insn, prior):
+        """(register, limit, False) for a mov or movzx that loads the memory a cmp with an immediate
+        compared in front of it, a ja or jae between (cmp dword ptr [ebp + 0x14], 4; ja; mov eax, dword
+        ptr [ebp + 0x14]: GCC 12 -Os on i386 switching over a stack argument, FreeRTOS's xTaskGenericNotify
+        and its FromISR form; GCC -O2's prvTimerTask has a store to a global between the compare and the
+        ja): the index is in the register from the load on, set after it; ja lets imm + 1 values
+        through, jae imm. What lies between may write neither the memory operand's registers nor
+        memory other than at a fixed address, nor branch, and between the compare and the branch not
+        the flags either. None otherwise. (Until 2026-10-28 a compare of memory was no bound check, and
+        such a switch was a jump to targets not known.)"""
+        ops = insn.operands
+        if insn.mnemonic not in ("mov", "movzx") or len(ops) != 2 or ops[1].type != X.X86_OP_MEM:
+            return None
+        reg = self._reg_operand(insn, ops[0])
+        if reg is None or reg in ("esp", "ebp") or (insn.mnemonic == "mov" and ops[1].size != 4):
+            return None
+        mem = ops[1].mem
+        regs = {self._name(insn.reg_name(r)) for r in (mem.base, mem.index) if r}
+
+        def harmless(p, flags):
+            if self.flow(p)[0] != "next":
+                return False
+            reads, writes = self.reg_effects(p)
+            if set(writes) & regs or (flags and "flags" in writes):
+                return False
+            first = p.operands[0] if p.operands else None
+            stores = first is not None and first.type == X.X86_OP_MEM and p.mnemonic not in ("cmp", "test", "push")
+            return not stores or (not first.mem.base and not first.mem.index)
+        branch = None
+        for p in list(prior)[:self.BOUNDED_LOAD_BACK]:
+            if p is None:
+                return None
+            if branch is None:
+                if p.mnemonic in ("ja", "jae"):
+                    branch = p.mnemonic
+                elif not harmless(p, False):
+                    return None
+                continue
+            cops = p.operands
+            if p.mnemonic == "cmp" and len(cops) == 2 and cops[0].type == X.X86_OP_MEM and cops[1].type == X.X86_OP_IMM:
+                a = cops[0].mem
+                if cops[0].size != ops[1].size or (a.base, a.index, a.scale, a.disp, a.segment) != \
+                        (mem.base, mem.index, mem.scale, mem.disp, mem.segment):
+                    return None
+                imm = cops[1].imm & 0xFFFFFFFF
+                limit = imm if branch == "ja" else imm - 1
+                return (reg, limit, False) if 0 <= limit < 0x10000 else None
+            if not harmless(p, True):
+                return None
         return None
 
     def switch_targets(self, insn, program, inside):
