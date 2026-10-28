@@ -72,6 +72,8 @@ class Model:
 
     # An interrupt controller also has line(number, level), pending_interrupt() -> the number to
     # take or None, taken(number) and returned() (dread.models.intc, dread.models.nvic).
+    # A device of x86's port space also has ports ([(lo, hi)] of the ports it owns), port_read(port,
+    # size) -> the value in reads and port_write(port, size, value) for out (dread.sysrun _port).
 
 
 def without(ranges, holes):

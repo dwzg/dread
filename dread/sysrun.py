@@ -166,8 +166,8 @@ import ctypes
 import os
 import sys
 
-from unicorn import (UC_HOOK_BLOCK, UC_HOOK_INTR, UC_HOOK_MEM_READ, UC_HOOK_MEM_UNMAPPED, UC_HOOK_MEM_WRITE,
-                     UC_MEM_WRITE, Uc, UcError)
+from unicorn import (UC_HOOK_BLOCK, UC_HOOK_INSN, UC_HOOK_INTR, UC_HOOK_MEM_READ, UC_HOOK_MEM_UNMAPPED,
+                     UC_HOOK_MEM_WRITE, UC_MEM_WRITE, Uc, UcError)
 
 from dread.arch import code_address
 from dread import models as dmodels
@@ -353,6 +353,7 @@ class System:
         self.regs = _Registers(uc)
         owned = sorted((lo, hi, m) for m in self.models for lo, hi in m.ranges)
         self.owned_lo, self.owned = [lo for lo, _, _ in owned], owned
+        self.port_owned = sorted((lo, hi, m) for m in self.models for lo, hi in getattr(m, "ports", ()))
         self.log, self.clock, self.stop = [], 0, None
         self.next_event = None
         self.levels = {}
@@ -412,6 +413,10 @@ class System:
         self._reg_info, self._reg_views, self._reg_base = [], [], None     # per entry (_new_reg)
         self.fault = None
         uc.hook_add(UC_HOOK_MEM_UNMAPPED, self._on_unmapped)
+        ports = getattr(self.arch, "port_instructions", None)
+        if ports and isinstance(uc, Uc):    # (x86's in and out: the port space, _port)
+            uc.hook_add(UC_HOOK_INSN, self._on_port_in, None, 1, 0, ports[0])
+            uc.hook_add(UC_HOOK_INSN, self._on_port_out, None, 1, 0, ports[1])
         # An exception the core raises itself: svc (taken through a controller with pend(), the M
         # profile's SVCall) and the start of an M-profile exception return (finished by the layer);
         # any other is a fault. Without the hook Unicorn stops at each with an error; with it, it
@@ -955,6 +960,52 @@ class System:
         if i >= 0 and address < self.owned[i][1]:
             return self.owned[i][2]
         return None
+
+    def _on_port_in(self, uc, port, size, user=None):
+        return self._port(False, port, size, 0)
+
+    def _on_port_out(self, uc, port, size, value, user=None):
+        self._port(True, port, size, value)
+
+    def _port(self, out, port, size, value):
+        """x86's in and out: the port space beside memory (a PC's PIT and system control port, its
+        legacy devices). A model that owns the port (its `ports`, [(lo, hi)]) answers in through
+        port_read(port, size) and takes out through port_write(port, size, value); a port no model
+        owns reads 0, as Unicorn answered every in until 2026-10-28, and takes what is written. Each
+        access is logged in order as a device access ("in", the same read again counted into one
+        entry, and "out") and takes a device access's time on the shared clock. Returns in's value."""
+        st = self.st
+        pc = self.regs.reg_read(self.layout.pc)
+        if st.io_done:
+            self._take_log()
+        model = next((m for lo, hi, m in self.port_owned if lo <= port < hi), None)
+        who, mask = (model.name if model else "-"), (1 << 8 * size) - 1
+        self._pc = pc
+        st.clock += ACCESS
+        st.frozen = 0                       # the clock moved: a stretch outside shared code ends
+        self.last_access = st.progress = st.clock
+        got = None
+        if out:
+            value &= mask
+            self._log(("out", who, port, size, value), at=pc)
+            self.last_new = self.clock
+            if model is not None:
+                model.port_write(port, size, value)
+                self.schedule()             # (an out may set when the model acts next)
+        else:
+            got = (model.port_read(port, size) if model is not None else 0) & mask
+            last = self.log[-1] if self.log else None
+            if last is not None and last[:5] == ("in", who, port, size, got):
+                self.log[-1] = last[:5] + (last[5] + 1,)
+            else:
+                self._log(("in", who, port, size, got, 1), at=pc)
+                self.last_new = self.clock
+        if st.clock >= st.next_event or st.clock >= st.limit:
+            st.due = 1
+        if self.fast is not None and model is not None:
+            self._refresh_plain()           # (what the model's registers read may have changed)
+        self._pc = None
+        return got
 
     def _on_io(self, uc, access, addr, size, value, user):
         """A device access, where the C hook is not at hand."""

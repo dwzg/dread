@@ -1816,6 +1816,61 @@ def test_a_scenario_may_allow_a_long_stretch_without_news(tmp_path):
     assert any(e[0] == "write" for e in done.log), done.how
 
 
+
+PORTS_RUN_C = r"""
+__asm__(".text\n.globl _start\n.type _start, @function\n_start:\n"
+        "    movl $0, 0x20000000\n"
+        "    movw $0x80, %dx\n    movb $0x5a, %al\n    outb %al, %dx\n    inb %dx, %al\n"
+        "    movzbl %al, %eax\n    movl %eax, 0x40000000\n"
+        "1:  hlt\n    jmp 1b\n.size _start, .-_start\n");
+"""
+
+PORT_MODEL = """
+from dread.models import Model
+
+
+class Port(Model):
+    def __init__(self, system, name, config):
+        super().__init__(system, name, config)
+        self.ports = [(0x80, 0x82)]
+        self.seen = []
+
+    def port_read(self, port, size):
+        return 0xa5
+
+    def port_write(self, port, size, value):
+        self.seen.append(value)
+
+    def report(self):
+        return {"seen": self.seen}
+"""
+
+
+def test_the_system_runs_port_space(tmp_path):
+    """x86's in and out in the system run (dread.sysrun _port): a model that owns ports answers in
+    (port_read) and takes out (port_write), each logged in order as a device access. This startup
+    writes 0x5a to port 0x80, reads it back (the model answers 0xa5) and stores what it read into a
+    device word. Until 2026-10-28 the system run had no port space: Unicorn answered every in with 0,
+    and FreeRTOS's IA32 demo waited forever for the PIT that times its calibration. (Its first store
+    goes to RAM: a run whose first memory access is a device's logs that access twice, an open item.)"""
+    target = small_i386(tmp_path, PORTS_RUN_C, "portrun")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import sysrun
+    from dread.target import Target
+    root = tmp_path / "portrun"
+    (root / "ports.py").write_text(PORT_MODEL)
+    toml = root / "dread.toml"
+    toml.write_text(toml.read_text().replace("sentinel = ", "io = [[0x40000000, 0x40001000]]\nsentinel = ")
+                    + '\n[models.port]\nkind = "ports.py:Port"\n')
+    target = Target.load(str(toml))
+    image = target.image()
+    outcome = sysrun.run_image(target, image, image.payload(), {"limit": 100000})
+    log = [e for e in outcome.log if e[0] in ("in", "out", "write")]
+    assert log == [("out", "port", 0x80, 1, 0x5a), ("in", "port", 0x80, 1, 0xa5, 1), ("write", "-", 0x40000000, 4, 0xa5)], log
+    assert outcome.reports["port"] == {"seen": [0x5a]}
+
+
 def test_the_layer_takes_values_apart():
     """The x86 layer's hooks for dread.uncovered, dread.relations and dread.statics: value_step gives an
     access at a fixed address with base 0 (absolute_accesses) and none at an unknown base, values for

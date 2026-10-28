@@ -20,8 +20,10 @@ For dread.sysrun: the reset leaves Unicorn's protected mode as it is (the startu
 esp), interrupts enter through the IDT's gate of a vector (enter_interrupt), iret runs in the emulator,
 and the instructions behind which Unicorn ends a block are measured (ends_block).
 
+The system run's port space (in and out) goes to models that own ports (dread.sysrun _port).
+
 Not yet: the x87, MMX and SSE registers, string instructions beyond what the analysis needs, 16-bit and
-64-bit modes, the system run's port I/O (a PC's devices).
+64-bit modes.
 """
 import re
 import struct

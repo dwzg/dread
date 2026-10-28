@@ -6908,11 +6908,22 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
             the uart model there as a 16550 at a stride of four (data 0x0, line status 0x14, its divisor
             latch through lcr 0xc: models.uart lcr). The demo finds and sets up its UART, reads the I2C
             controller (0xe00aa000) as absent, and programs the HPET.
-          - [ ] Port I/O in the system run: x86's in and out to models that own ports (dread.emu has a
-            port space for cases; the system run has none, dread.arch.x86's "Not yet"). uiCalibrateTimer
+          - [x] Port I/O in the system run: x86's in and out to models that own ports (dread.emu has a
+            port space for cases; the system run had none, dread.arch.x86's "Not yet"). uiCalibrateTimer
             times a one-shot of the PIT's channel 2 (ports 0x43, 0x42: about 10 ms) by polling port
-            0x61's bit 5, and there the run waits now (in reads 0).
+            0x61's bit 5, and there the run waits now (in reads 0). Since 2026-10-28 (dread.sysrun _port):
+            a model's ports ([(lo, hi)]) with port_read and port_write, each access logged in order ("in",
+            repeats counted, "out") and timed as a device access; a port no model owns reads 0.
+            tests/test_x86.py: out to a model's port, in from it, the value stored to a device word.
           - [ ] The PIT's channel 2 and port 0x61, as far as that calibration needs.
+          - [ ] A run whose first memory access goes to a device logs it twice (found 2026-10-28 on
+            small i386 programs, on main as well): movl $0xa5, %eax; movl %eax, 0x40000000 at the entry
+            gives two writes, the second one done by the C hook after Python's _io had registered the
+            register, so the instruction ran twice without any stop of the run; with a RAM access in
+            front of it in the same block (incl 0x20000000) the store is logged once, and later device
+            accesses are too, also with stops between (scenario input events halt the run: a loop's
+            forty stores stay forty). Both images alike, so no comparison saw it; the FreeRTOS demos'
+            first accesses are RAM's. Not traced into Unicorn yet.
           - [ ] The HPET (0xfed00000): the main counter from the shared clock, timer 0's comparator and
             its interrupt (routed to the I/O APIC's input 2).
           - [ ] The local APIC (0xfee00000: its timer, which the calibration reads and FreeRTOS's tick
