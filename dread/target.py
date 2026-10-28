@@ -69,7 +69,7 @@ IMAGE_KEYS = {
     "record_specs": str, "src": str, "startup": (list, dict), "tables": dict, "arch": dict, "vectors": int,
     "free": list, "fixed": dict,
 }
-FREE = ("models", "plugins", "scenarios")
+FREE = ("models", "plugins", "scenarios", "boot")
 
 
 class TargetError(Exception):
@@ -598,6 +598,7 @@ class Target:
         self.models = data.get("models", {})
         self.plugins = data.get("plugins", {})
         self.scenarios = data.get("scenarios", {})
+        self.boot = self._boot(data.get("boot", {}))
         images = data.get("image", {})
         if not images:
             raise TargetError("%s: no [image.NAME] section" % self.file)
@@ -644,6 +645,23 @@ class Target:
     def path(self, p):
         """A path of the description, relative to the target directory."""
         return p if os.path.isabs(p) else os.path.normpath(os.path.join(self.root, p))
+
+    def _boot(self, boot):
+        """The [boot] table: what a boot loader leaves at the image's entry, which the system run sets
+        at reset in both images (dread.sysrun): registers by name ({"eax": 0x2badb002}) and words in
+        memory ([{address, words}]). FreeRTOS's IA32 demo halts unless a multiboot loader's eax and the
+        block ebx points to are there."""
+        if not isinstance(boot, dict):
+            raise TargetError("%s: [boot] must be a table" % self.file)
+        registers = boot.get("registers", {})
+        memory = boot.get("memory", [])
+        if not isinstance(registers, dict) or not all(isinstance(v, int) for v in registers.values()):
+            raise TargetError("%s: [boot] registers must map register names to numbers" % self.file)
+        if not isinstance(memory, list) or not all(
+                isinstance(b, dict) and isinstance(b.get("address"), int) and isinstance(b.get("words"), list)
+                and all(isinstance(w, int) for w in b["words"]) for b in memory):
+            raise TargetError("%s: [boot] memory must be a list of {address, words}" % self.file)
+        return {"registers": dict(registers), "memory": [dict(b) for b in memory]}
 
     def image(self, name=None):
         """The image `name`, else $DREAD_IMAGE, else the first."""

@@ -1748,6 +1748,74 @@ def test_a_switch_bounded_by_a_compare_of_memory(tmp_path):
     assert "    index = eax;" in text and "switch (index) { case 0: goto L_" in text and "case 3: goto L_" in text, text
 
 
+
+BOOT_C = r"""
+__asm__(".text\n.globl _start\n.type _start, @function\n_start:\n"
+        "    cmpl $0x2badb002, %eax\n    jne 1f\n    testb $0x40, (%ebx)\n    je 1f\n"
+        "    movl $0x4f4b, 0x40000000\n"
+        "1:  hlt\n    jmp 1b\n.size _start, .-_start\n");
+"""
+
+
+def test_a_boot_loaders_registers_and_memory_at_reset(tmp_path):
+    """The target's [boot] table (dread.target, dread.sysrun): what a boot loader leaves at the image's
+    entry, registers by name and words in memory, set at reset in both images. FreeRTOS's IA32 demo
+    halts unless a multiboot loader's magic is in eax and ebx points at a block with bit 6 of its flags
+    (a memory map); this startup checks the same and writes a device word only then: without the table
+    it halts at once, with it the write is in the device log."""
+    target = small_i386(tmp_path, BOOT_C, "boot")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import sysrun
+    from dread.target import Target
+    toml = tmp_path / "boot" / "dread.toml"
+    text = toml.read_text().replace("sentinel = ", "io = [[0x40000000, 0x40001000]]\nsentinel = ")
+    toml.write_text(text)
+
+    def written(target):
+        image = target.image()
+        outcome = sysrun.run_image(target, image, image.payload(), {"limit": 100000})
+        return [sysrun.show(e) for e in outcome.log if e[0] == "write"]
+    assert written(Target.load(str(toml))) == []
+    toml.write_text(text + "\n[boot]\nregisters = {eax = 0x2badb002, ebx = 0x20001000}\n"
+                           "memory = [{address = 0x20001000, words = [0x40]}]\n")
+    shown = written(Target.load(str(toml)))
+    assert len(shown) == 1 and "0x40000000" in shown[0] and "0x4f4b" in shown[0], shown
+    toml.write_text(text + "\n[boot]\nregisters = {eax = \"magic\"}\n")
+    with pytest.raises(Exception, match="boot"):
+        Target.load(str(toml))
+
+
+
+QUIET_C = r"""
+__asm__(".text\n.globl _start\n.type _start, @function\n_start:\n"
+        "    movl $300000, %ecx\n2:  decl %ecx\n    jnz 2b\n"
+        "    movl $0x4f4b, 0x40000000\n"
+        "1:  hlt\n    jmp 1b\n.size _start, .-_start\n");
+"""
+
+
+def test_a_scenario_may_allow_a_long_stretch_without_news(tmp_path):
+    """The system run takes a stretch without a new block or a device access (QUIET units of shared
+    clock) for a wait and ends the run; a scenario's quiet allows a longer one. FreeRTOS's IA32 demo
+    zeroes its heap at boot in one loop longer than that; this startup counts down as long before its
+    device write (300000 rounds of three units each, against 200000): with the default the run ends
+    waiting in the loop, with quiet it gets to the write."""
+    target = small_i386(tmp_path, QUIET_C, "quiet")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import sysrun
+    from dread.target import Target
+    toml = tmp_path / "quiet" / "dread.toml"
+    toml.write_text(toml.read_text().replace("sentinel = ", "io = [[0x40000000, 0x40001000]]\nsentinel = "))
+    target = Target.load(str(toml))
+    image = target.image()
+    waited = sysrun.run_image(target, image, image.payload(), {"limit": 100_000_000})
+    assert waited.how.startswith("waits") and not any(e[0] == "write" for e in waited.log), waited.how
+    done = sysrun.run_image(target, image, image.payload(), {"limit": 100_000_000, "quiet": 1_000_000})
+    assert any(e[0] == "write" for e in done.log), done.how
+
+
 def test_the_layer_takes_values_apart():
     """The x86 layer's hooks for dread.uncovered, dread.relations and dread.statics: value_step gives an
     access at a fixed address with base 0 (absolute_accesses) and none at an unknown base, values for

@@ -6884,6 +6884,29 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         timer functions of each bench build had no case for it (GCC: prvProcessExpiredTimer, prvReloadTimer,
         xSecondTimerHandler; clang: xFirstTimerHandler instead of the last); all six pass the lift check now.
         tests/test_x86.py: callit.
+      - [ ] A system run of the demo (planned 2026-10-28). What the lift check drops on the three builds
+        is mostly the demo's tasks that never return (prvCountingSemaphoreTask, prvQueueOverwriteTask,
+        prvTestMasterTask, vCounterControlTask, ...: 15 to 21 per build, nearly all for coverage), which on
+        ARM the system run accepts, and the two interrupt handlers that lift since this morning wait for
+        one. Steps:
+        - [x] What the boot loader leaves: _start halts unless eax holds the multiboot magic 0x2badb002
+          and ebx points at an information block whose flags have bit 6 (a memory map); nothing else
+          reads the block. A target's [boot] table: registers and words in memory set at reset, in both
+          images (dread.sysrun, docs/target.md). Done 2026-10-28, with a scenario's quiet: the demo's
+          startup then zeroes its heap in one memset longer than the run's QUIET (a stretch without a
+          new block or a device access, taken for a wait). With both, the GCC -O2 build runs through
+          its startup and main to uiCalibrateTimer: 21 functions entered, the configuration space read
+          at 0xe00a5010 (the UART's base address) and 0xe00aa000, the HPET programmed (its counter,
+          timer 0 at 0xfed00100), the local APIC's ID read, the I/O APIC's redirection written, 255
+          writes of end of interrupt, and there it waits for the HPET's counter to move (every device
+          read answers 0 without models). tests/test_x86.py: a startup that checks the same, with and
+          without [boot]; a countdown longer than QUIET, with and without quiet.
+        - [ ] The devices the demo's boot and tick need, as models: the Quark's UART (a PCI device: its
+          registers through the base address the configuration space at 0xe0000000 holds), the HPET
+          (0xfed00000), the local APIC (0xfee00000: end of interrupt, the error and spurious vectors) and
+          the I/O APIC (0xfec00000), as far as the run shows each needed.
+        - [ ] Scenarios: to the demo's first lines on the serial port and a few ticks; then the lift
+          check's system phase on the tasks and the handlers, and the measurement.
       - [ ] prvTimerTask's loop cases (both -Os bench builds: "only 0 of 100 generated inputs ran to the
         end"; on -O2 it lifts since its switch's bound check is known, 2026-10-28, and misses 189 of 279
         instructions): the stub of xQueueReceive fills the received message with the loop frame's bytes (96 on x86

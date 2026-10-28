@@ -248,6 +248,24 @@ rx_ready = 0x2
 | `entry` | the shared-clock units a function entered outside shared code takes (default `dread.sysrun.ENTRY`, 56: about what the original's code of such a function runs per entry when shared). The C must make the original's calls to such functions: hand-written C with several rewritten functions in one file is compiled without inlining them into each other (`-fno-inline` in `cflags`, or `noinline` on them), else the rebuilt image enters fewer functions and its clock parts from the original's |
 | `input` | `[[clock, "model", "bytes"], ...]`: input handed to a model at that time |
 | `models` | the models of the run (default: all of `[models]`; `[]` for none) |
+| `quiet` | the shared-clock units a stretch without a new block or a device access may last before the run takes it for a wait and ends (default `dread.sysrun.QUIET`, 200000; a loop of two instructions takes three a round): for a boot that zeroes a large area in one loop (FreeRTOS's IA32 demo, its heap) |
+
+### `[boot]`: what a boot loader leaves
+
+What the image's entry finds besides the reset state, set at the system run's reset in both images:
+
+| Key | Meaning |
+|---|---|
+| `registers` | `{name = value}`: registers by the architecture's names (x86: `eax`, `ebx`, ...) |
+| `memory` | `[{address = A, words = [...]}]`: words (four bytes, little-endian) written from A |
+
+A multiboot loader's state, which FreeRTOS's IA32 demo checks at its entry and halts without:
+
+```toml
+[boot]
+registers = {eax = 0x2badb002, ebx = 0x9000}
+memory = [{address = 0x9000, words = [0x40]}]    # flags: bit 6, a memory map
+```
 
 ## Plugins
 

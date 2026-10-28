@@ -184,6 +184,7 @@ CHUNK = 50_000           # blocks per emu_start (stop rules are checked between 
 # (FreeRTOS's main_full rebuilt: 106 units behind at the limit, two device accesses more in its log)
 ACCESS = 8               # shared-clock units a device access takes
 QUIET = 200_000          # shared-clock units without a new block or a device access: the firmware waits
+                         # (a scenario's "quiet" in its place: FreeRTOS's IA32 demo zeroes a heap at boot)
 FROZEN = 2_000           # blocks in a row outside shared code without a device access (a stretch in which
                          # the clock stands still) from which the run looks for a loop there (System._loops)
 LOOP_MAX = 200_000       # blocks of such a stretch after which it counts as a wait without a loop found
@@ -1182,11 +1183,24 @@ class System:
                 addr, size, uc.reg_read(self.layout.pc))
         return False
 
+    def _boot_state(self, uc):
+        """What a boot loader leaves at the entry, from the target's [boot] table (dread.target): its
+        registers and words in memory, set after the core's reset, the same in both images."""
+        boot = getattr(self.target, "boot", None) or {}
+        for name, value in sorted(boot.get("registers", {}).items()):
+            rid = self.arch.reg_id(name)
+            if rid is None:
+                raise tgt.TargetError("[boot]: %s is no register of this core" % name)
+            uc.reg_write(rid, value & 0xFFFFFFFF)
+        for block in boot.get("memory", ()):
+            uc.mem_write(block["address"], b"".join((w & 0xFFFFFFFF).to_bytes(4, "little") for w in block["words"]))
+
     # ---- the run ----
 
     def run(self, limit=LIMIT):
         uc, arch = self.uc, self.arch
         self.limit = limit
+        quiet = int(self.scenario.get("quiet", QUIET))      # (how long a stretch without news may last)
         self.st.observers, self.st.spin = 1 if self.observers else 0, SPIN
         self.st.stretch_from, self.st.loop_max = FROZEN, LOOP_MAX
         if self.fast is not None:
@@ -1199,6 +1213,7 @@ class System:
         def write_word(address, value):
             uc.mem_write(address, (value & 0xFFFFFFFF).to_bytes(4, "little"))
         pc = arch.reset(uc, word, self.image.entry, self.image.vectors)
+        self._boot_state(uc)
         self.st.came, self.st.vector = CAME_RESET, 1
         self.schedule()
 
@@ -1286,8 +1301,8 @@ class System:
             self.service()
             if jump:                                # and no shared block behind which to take its interrupt:
                 pc = take(pc)                       # at once, or behind the first block the core takes it in
-            if self.next_event is None and (stuck or self.clock - self.last_new >= QUIET):
-                if self.log and self.log[-1][0] == "read" and self.clock - self.last_access < QUIET:
+            if self.next_event is None and (stuck or self.clock - self.last_new >= quiet):
+                if self.log and self.log[-1][0] == "read" and self.clock - self.last_access < quiet:
                     how = "polls: register 0x%x read %d times in a row, nothing scheduled, pc 0x%x" % (
                         self.log[-1][2], self.log[-1][5], code_address(self.arch, pc))
                 else:
