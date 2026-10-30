@@ -83,6 +83,8 @@ def test_analysis_agrees_with_the_elf(target, variant, tmp_path):
     assert rc == 0
     truth = {e: (n, s) for e, n, s in read_functions(image.table("functions"))}
     got = {e: (n, s) for e, n, s in read_functions(str(tmp_path / "config" / "functions.tsv"))}
+    names = [n for n, _ in got.values()]
+    assert len(set(names)) == len(names)                    # the program refuses a name listed twice
     for entry, (name, size) in truth.items():
         assert entry in got, name
         assert got[entry] == (name, size), (name, got[entry])

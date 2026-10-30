@@ -33,7 +33,11 @@ Written by the Ghidra pipeline (`dread ghidra`) or by `dread import-elf`. Not ed
 details of the writers:
 
 - `dread ghidra` names a thunk Ghidra shows under its target's name `thunk_NAME`, so that names stay
-  unique.
+  unique; a name that is still taken (two thunks of one function) gets the function's address,
+  `thunk_NAME_ADDRESS` (until 2026-10-30 both were `thunk_NAME`, a table the tools refuse). It
+  leaves out the functions Ghidra makes at call targets in memory the image does not fill (code
+  loaded there at run time): they have no instructions (until 2026-10-30 they were listed, and the
+  lifter stopped on them).
 - `dread import-elf` leaves out an alignment `nop` at the end of a function's last instruction run.
   GCC counts that nop in the symbol's size, but it never executes, and a test that has to execute
   every instruction would never be complete. Ghidra's analysis does not count it either.

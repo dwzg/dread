@@ -462,11 +462,16 @@ class Program:
 
     def insn(self, address):
         """The instruction at `address` (capstone CsInsn), decoded with its code range so that
-        Thumb IT conditions are right; None if it does not decode."""
+        Thumb IT conditions are right; None if it does not decode, or lies outside the image (a call's
+        target in code loaded there at run time: an overlay the resident code calls)."""
         if address not in self._insns:
             self._decode_range(address)
             if address not in self._insns:
                 size = self.code[address][0] if address in self.code else 4
+                if not self.in_image(address, min(size, 2)):
+                    self._insns[address] = None
+                    return None
+                size = min(size, self.base + len(self.data) - self.stored(address))
                 self._insns[address] = self.arch.decode(self.read(address, size), address, self.isa_at(address))
         insn = self._insns[address]
         if insn is not None and not getattr(insn, "dread_marked", False):

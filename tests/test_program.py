@@ -399,3 +399,31 @@ def test_a_long_text_shows_its_start_and_its_end():
     assert constants.string_at(program, 0x1200) == "x" * 48 + "..."
     assert constants.string_at(program, 0x1380) == "short"
     assert constants.pointed_note(program, 0x1100).endswith('MemMang/heap_4.c"')
+
+
+def _bl(isa, at, to):
+    """A bl from `at` to `to`, encoded for `isa` (a32 or t32)."""
+    import struct
+    if isa == "a32":
+        return struct.pack("<I", 0xeb000000 | (((to - at - 8) >> 2) & 0xffffff))
+    off = (to - at - 4) & 0x1ffffff
+    s, i1, i2 = off >> 24, (off >> 23) & 1, (off >> 22) & 1
+    j1, j2 = (1 - i1) ^ s, (1 - i2) ^ s
+    return struct.pack("<2H", 0xf000 | (s << 10) | ((off >> 12) & 0x3ff),
+                       0xd000 | (j1 << 13) | (j2 << 11) | ((off >> 1) & 0x7ff))
+
+
+def test_a_call_out_of_the_image_is_an_ordinary_call(program, variant):
+    """A bl to an address outside the image (code another loader puts there at run time: an overlay
+    module the resident code calls) is an ordinary call, and the program has no instruction there.
+    mark_call looks at the target for a stub, and Program.insn read the bytes there, which raised
+    TargetError and stopped dread asm and dread lift (2026-10-30)."""
+    if program.arch.name != "arm":
+        pytest.skip("ARM's mark_call")
+    fn = program.functions[0]
+    outside = program.image.base + len(program.data) + 0x1000
+    insn = program.arch.decode(_bl(fn.isa, fn.entry, outside), fn.entry, fn.isa)
+    assert program.arch.target(insn) & ~1 == outside
+    program.arch.mark_call(program, insn)
+    assert not hasattr(insn, "call_via") and not getattr(insn, "dispatch_call", False)
+    assert program.insn(outside) is None

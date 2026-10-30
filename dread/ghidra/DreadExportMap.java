@@ -10,6 +10,8 @@ import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.HashSet;
+import java.util.Set;
 
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.lang.Register;
@@ -25,10 +27,17 @@ public class DreadExportMap extends GhidraScript {
 			throw new IllegalArgumentException("usage: DreadExportMap.java <functions.tsv> <code_ranges.tsv>");
 		}
 		int functions = 0;
+		Set<String> taken = new HashSet<>();
 		try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(Paths.get(args[0]), StandardCharsets.UTF_8))) {
 			out.println("address\tname\tbytes\tprototype");
 			for (Function f : currentProgram.getFunctionManager().getFunctions(true)) {
 				if (f.isExternal()) {
+					continue;
+				}
+				ghidra.program.model.mem.MemoryBlock block = currentProgram.getMemory().getBlock(f.getEntryPoint());
+				if (block == null || !block.isInitialized()) {
+					// a call's target in memory the image does not fill (code another loader puts there
+					// at run time): Ghidra makes a function of no instructions there, which is not the image's
 					continue;
 				}
 				String name = f.getName();
@@ -38,6 +47,11 @@ public class DreadExportMap extends GhidraScript {
 					if (t != null && name.equals(t.getName())) {
 						name = "thunk_" + name;
 					}
+				}
+				if (!taken.add(name)) {
+					// two functions of one name (two thunks of one function): the second takes its address
+					name = String.format("%s_%x", name, f.getEntryPoint().getOffset());
+					taken.add(name);
 				}
 				out.printf("0x%x\t%s\t%d\t%s%n", f.getEntryPoint().getOffset(), name,
 					f.getBody().getNumAddresses(), f.getPrototypeString(false, false));
