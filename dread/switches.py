@@ -279,6 +279,25 @@ def _find_check(program, fn, i, start, seed=True):
     return None
 
 
+def _excludes_the_limit(program, fn, k, i):
+    """Whether the compare fn.insns[k] (cmp rN, #K) lets K values through rather than K + 1: the
+    first conditional branch behind it, before the jump fn.insns[i], is one the layer says leaves at
+    K (arch.bound_excludes: ARM's bhs out or blo in, armcc's form; GCC compares with K - 1 and
+    leaves with bhi). A layer without bound_excludes lets K + 1 through, as before."""
+    arch = program.arch
+    excludes = getattr(arch, "bound_excludes", None)
+    if excludes is None:
+        return False
+    for j in range(k + 1, i):
+        insn = program.insn(fn.insns[j])
+        if insn is None:
+            return False
+        kind, _, conditional = arch.flow(insn)
+        if kind == "jump" and conditional:
+            return excludes(insn)
+    return False
+
+
 def resolve(program, fn, address, seed=True):
     """(inside, outside) targets of the indirect jump at `address` (see the module), or None. seed:
     the runs start with the constants known there (_presets)."""
@@ -347,6 +366,8 @@ def mapping(program, fn, address, seed=True):
     set_at = fn.insns[k] if before else (fn.insns[k + 1] if k + 1 <= i else None)
     if set_at is None:
         return None
+    if before and limit > 0 and _excludes_the_limit(program, fn, k, i):
+        limit -= 1
     isa = program.isa_at(address)
     uc, state = _engine(program, isa)
     runs = [(0, set_at, arch.reg_id(reg), value) for value in range(0, min(limit, MAX_CASES) + 2)]

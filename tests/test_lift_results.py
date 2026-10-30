@@ -952,3 +952,123 @@ def test_a_body_without_room_drops_its_function_not_the_build(tmp_path):
     lines = []
     assert lift.check(t, t.image(), ["roomy_quad_split"], out=lines.append, jobs=2) == ["roomy_quad_split"], \
         "\n".join(lines)
+
+
+EARLY_RETURN_T2_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global early_sum, early_local, use
+    .type early_sum, %function
+    .thumb_func
+early_sum:                      @ r0 bytes from r1 summed; nothing at all for none
+    push    {r4, r5}
+    movs    r2, #0
+    adds    r4, r0, #0
+    itt     eq
+    popeq   {r4, r5}
+    bxeq    lr
+1:  ldrb    r5, [r1], #1
+    add     r2, r2, r5
+    subs    r4, r4, #1
+    bne     1b
+    mov     r0, r2
+    pop     {r4, r5}
+    bx      lr
+    .size early_sum, . - early_sum
+    .type early_local, %function
+    .thumb_func
+early_local:                    @ with locals: the frame and the registers go under one condition
+    push    {r4, lr}
+    sub     sp, #8
+    str     r0, [sp, #4]
+    cmp     r0, #0
+    itt     eq
+    addeq   sp, #8
+    popeq   {r4, pc}
+    ldr     r4, [sp, #4]
+    adds    r0, r4, r1
+    cmp     r0, #100
+    it      hi
+    addhi   sp, #8
+    it      hi
+    pophi   {r4, pc}
+    adds    r0, r0, #1
+    add     sp, #8
+    pop     {r4, pc}
+    .size early_local, . - early_local
+    .type use, %function
+    .thumb_func
+use:
+    push    {r4, lr}
+    bl      early_sum
+    movs    r1, #5
+    bl      early_local
+    pop     {r4, pc}
+    .size use, . - use
+"""
+
+
+@needs_arm
+def test_a_pop_and_a_return_under_one_condition_are_an_early_return(tmp_path):
+    """armcc returns early with `itt eq; popeq {r4, r5}; bxeq lr`, and with locals `itt eq; addeq sp,
+    #8; popeq {r4, pc}` or `it hi; addhi sp, #8; it hi; pophi {r4, pc}`: the frame goes and the return runs
+    under one condition, and the path that does not take them keeps its frame. They were refused
+    ("moves the stack pointer under a condition"), as GCC's `popeq {r4, r5, pc}` is not; now each is
+    one conditional return, lifted and accepted on the original's cases."""
+    t = arm_program(tmp_path, "t2", EARLY_RETURN_T2_S)
+    p = Program(t, t.image())
+    text = lift.make_lifter(p, regflow.analyse(p)).lift(p.by_name["early_sum"]).text
+    assert "if (z) { return r0; }" in text, text
+    lines = []
+    assert "if (z) { return r0; }" in lift.make_lifter(p, regflow.analyse(p)).lift(p.by_name["early_local"]).text
+    names = ["early_local", "early_sum", "use"]
+    assert sorted(lift.check(t, t.image(), names, out=lines.append, jobs=2)) == names, "\n".join(lines)
+
+
+SWITCH_HS_T2_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global pick, use
+    .type pick, %function
+    .thumb_func
+pick:                           @ armcc's bound: cmp #3; bhs out lets 0, 1 and 2 through
+    movs    r1, #0
+    cmp     r0, #3
+    bhs     2f
+    tbb     [pc, r0]
+1:  .byte   (10f - 1b) / 2, (11f - 1b) / 2, (10f - 1b) / 2, 0
+10: movs    r1, #7
+    b       2f
+11: movs    r1, #9
+2:  mov     r0, r1
+    bx      lr
+    .size pick, . - pick
+    .type use, %function
+    .thumb_func
+use:
+    push    {r4, lr}
+    bl      pick
+    pop     {r4, pc}
+    .size use, . - use
+"""
+
+
+@needs_arm
+def test_a_switch_bounded_by_bhs_has_as_many_cases_as_it_compares_with(tmp_path):
+    """armcc bounds a switch with cmp rN, #3; bhs out: three values reach the table, where GCC writes
+    cmp rN, #2; bhi out. The bound was taken for GCC's, and the lifter refused the switch ("a switch
+    whose target for index 3 is not known"); now the branch decides how many pass."""
+    t = arm_program(tmp_path, "t2", SWITCH_HS_T2_S)
+    p = Program(t, t.image())
+    from dread import switches
+    fn = p.by_name["pick"]
+    jump = next(a for a in fn.insns if p.insn(a).mnemonic == "tbb")
+    check, reg, values, limit = switches.mapping(p, fn, jump)
+    assert limit == 2 and sorted(values) == [0, 1, 2], (limit, values)
+    lines = []
+    names = ["pick", "use"]
+    assert sorted(lift.check(t, t.image(), names, out=lines.append, jobs=2)) == names, "\n".join(lines)

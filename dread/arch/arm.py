@@ -666,6 +666,12 @@ class Arm:
             return self._name(insn.reg_name(ops[0].reg)), ops[2].imm, False
         return None
 
+    def bound_excludes(self, insn):
+        """Whether the conditional branch behind a switch's cmp rN, #K lets K values through, not K + 1:
+        bhs to the default or blo to the switch (armcc: cmp r2, #3; bhs out; tbb), where GCC
+        compares with K - 1 and branches with bhi. Used by dread.switches."""
+        return insn.cc in (csarm.ARM_CC_HS, csarm.ARM_CC_LO)
+
     SWITCH_MAX = 1024       # table entries read at most
 
     def switch_targets(self, insn, program, inside):

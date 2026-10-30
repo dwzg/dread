@@ -57,7 +57,9 @@ wrong translation apart (an xor loop run once from zero agrees with an or).
 
 A function is refused, with the reason, when it uses something not modelled exactly: an unknown
 instruction (coprocessor and status register access included), a stack pointer that is not static
-or moves under a condition, a register or the flags read before anything writes them (what the
+or moves under a condition (except where a return under the same condition follows with the frame
+gone: armcc's `itt eq; popeq {r4-r7}; bxeq lr` and `itt eq; addeq sp, #8; popeq {r4, pc}`, each one
+conditional return as GCC's `popeq {r4-r7, pc}` is), a register or the flags read before anything writes them (what the
 caller leaves: C receives r0-r3 only; with GCC on ARM the C gets r4-r12 as the caller left them,
 can_hand), callers that read the flags it leaves (C cannot return them) or a register beyond r0 and
 r1 it sets that no naked entry hands back (cannot_return_more: a compiler without naked functions, an
@@ -589,6 +591,7 @@ class Lifter:
         prog, arch = self.prog, self.arch
         index = {a: i for i, a in enumerate(fn.insns)}
         states = {fn.insns[0]: (0, self.entry_values())}
+        resume = {}             # a conditional return -> the state behind it (_pops_to_return)
         work = [fn.insns[0]]
         while work:
             a = work.pop()
@@ -606,10 +609,16 @@ class Lifter:
                 continue
             if arch.predicate(insn) is not None:
                 if new != depth and not returning:
-                    raise Refused("0x%x moves the stack pointer under a condition" % a)
-                after = {k: v for k, v in after.items() if values.get(k) == v}    # it may not run
+                    ret = self._pops_to_return(fn, index, insn, new, after)
+                    if ret is None:
+                        raise Refused("0x%x moves the stack pointer under a condition" % a)
+                    # the instructions up to the return under that condition run with the frame
+                    # gone; what follows the return runs with it as it was here
+                    resume.setdefault(ret, (depth, values))
+                else:
+                    after = {k: v for k, v in after.items() if values.get(k) == v}    # it may not run
             if returning:
-                new, after = depth, values      # what follows a conditional return runs unpopped
+                new, after = resume.get(a, (depth, values))     # what follows a conditional return runs unpopped
             for b in self.successors(fn, index, a, insn, strict, values):
                 if b in states:
                     old_depth, old = states[b]
@@ -624,6 +633,38 @@ class Lifter:
                     work.append(b)
         self._states[key] = states
         return states
+
+    def _pops_to_return(self, fn, index, insn, depth, values):
+        """The address of the return when `insn`, a stack move under a condition that leaves `depth`
+        and `values`, is followed by more instructions under the same condition that end in a return
+        with the frame gone (one conditional return, as GCC's `popeq {r4-r7, pc}` is). armcc writes them as `itt eq; popeq
+        {r4-r7}; bxeq lr` and, with locals, `itt eq; addeq sp, #N; popeq {r4, pc}`. None otherwise."""
+        prog, arch = self.prog, self.arch
+        cond = arch.predicate(insn)
+        i = index.get(insn.address)
+        if i is None:
+            return None
+        at = insn.address + insn.size
+        for j in range(i + 1, min(i + 5, len(fn.insns))):
+            nxt = prog.insn(fn.insns[j])
+            if nxt is not None and nxt.address == at and arch.name == "arm" and nxt.id == A.ARM_INS_IT:
+                at = nxt.address + nxt.size     # (a new IT block for the return: `addne sp, #N; it ne; popne`)
+                continue
+            if nxt is None or nxt.address != at or arch.predicate(nxt) != cond:
+                return None
+            if arch.flow(nxt)[0] == "return" or self.ret_jump(nxt, values):
+                if depth == 0:
+                    return nxt.address      # (bx lr behind the pop)
+                try:
+                    return nxt.address if self.step(nxt, depth, values)[0] == 0 else None    # (pop {..., pc})
+                except StackSwitch:
+                    return None
+            try:
+                depth, values = self.step(nxt, depth, values)
+            except StackSwitch:
+                return None
+            at = nxt.address + nxt.size
+        return None
 
     def entry_values(self):
         """What is known at a function's entry: the return address (RET) in the link register (on
