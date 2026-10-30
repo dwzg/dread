@@ -326,7 +326,8 @@ class System:
         self._big_clock, self._next_event = None, None
         for lo, hi in self.layout.maps:
             uc.mem_map(lo, hi - lo)
-        uc.mem_write(image.base, bytes(payload))
+        for at, part in self.layout.payload_spans(payload):
+            uc.mem_write(at, bytes(part))
         for c in image.startup():               # what the loader puts into memory besides the image
             if c.kind == "load":
                 uc.mem_write(c.run, c.data)

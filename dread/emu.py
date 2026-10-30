@@ -79,6 +79,9 @@ class Layout:
         self.io = list(mem.io)
         spans = [(r.base, r.end) for r in mem.regions]
         spans.append((image.base, max(image.limit, image.end)))
+        self.room = image.room                          # ([image] room: mapped in both images, filled in one)
+        if self.room is not None:
+            spans.append(self.room)
         spans += self.io
         spans.append((self.stack_top - self.stack_size, self.stack_top + ARGS_ROOM))
         spans.append((self.sentinel, self.sentinel + 4))
@@ -136,9 +139,19 @@ class Layout:
             return None
         return page
 
+    def payload_spans(self, payload):
+        """[(address, bytes)]: the parts of an image's payload that are loaded. A rebuilt image with C
+        in the image's room ([image] room) reaches up to the room's end: only its image and the room
+        are loaded, not the filler between (other memory there: RAM the firmware uses)."""
+        if self.room is not None and self.base + len(payload) > self.room[0]:
+            span = max(self.image.limit, self.image.end) - self.base
+            return [(self.base, payload[:span]),
+                    (self.room[0], payload[self.room[0] - self.base:self.room[1] - self.base])]
+        return [(self.base, payload)]
+
     def initial(self, payload):
         """[(address, bytes)]: what memory holds before any code runs."""
-        out = [(self.base, payload)]
+        out = self.payload_spans(payload)
         for c in self.image.startup():
             if c.kind == "load":                # the loader's bytes, not in the image
                 out.append((c.run, c.data))

@@ -2083,3 +2083,43 @@ def test_a_tail_call_through_a_pointer(tmp_path):
     assert jump("cb_tail") in sites and jump("leaf_tail") not in sites
     text = lift.make_lifter(program, regflow.analyse(program)).lift(program.by_name["cb_tail"]).text
     assert "return ((u32 (*)(u32, u32, u32, u32))r3)(r0, r1, r2, r3);" in text, text
+
+
+@pytest.mark.compiles
+def test_c_that_finds_no_room_behind_the_image_goes_into_its_room(tmp_path):
+    """An image with no room behind it (a firmware whose RAM behind its code holds data) cannot take
+    C larger than the original's code. [image] room gives it memory elsewhere, for the emulator
+    alone: gizmo-m3 with its limit at its end fails to build, and with a room away from the image the
+    C goes there, the lifted functions are accepted, and the emulator loads the image and the room
+    but not the filler between them."""
+    copy = tmp_path / "gizmo"
+    shutil.copytree(GIZMO, copy, ignore=shutil.ignore_patterns("build"))
+    for cache in ("autocases", "regflow"):
+        here = os.path.join(gizmo_dir("m3"), "build", cache)
+        if os.path.isdir(here):
+            shutil.copytree(here, copy / "m3" / "build" / cache)
+    toml = copy / "m3" / "dread.toml"
+    end = Target.load(str(copy / "m3")).image().end
+    text = re.sub(r"(?m)^limit = 0x08010000.*$", "limit = 0x%x" % end, toml.read_text())
+    toml.write_text(text)
+    target = Target.load(str(copy / "m3"))
+    with pytest.raises(Exception, match="room for the C is full|no room"):
+        build.build(target, target.image())
+    toml.write_text(text.replace("limit = 0x%x" % end, "limit = 0x%x\nroom = [0x08200000, 0x08210000]" % end))
+    target = Target.load(str(copy / "m3"))
+    image = target.image()
+    lines = []
+    names = ["fmt_dec", "keys_read"]
+    assert sorted(lift.check(target, image, names, out=lines.append, jobs=2)) == names, "\n".join(lines)
+    import json
+    with open(os.path.join(target.build, "lift-check", image.name, "placement.json")) as f:
+        placed = json.load(f)
+    assert placed["summary"]["emulator_only"]
+    assert any(p["placement"] == "room" or 0x08200000 <= p["address"] < 0x08210000
+               for p in placed["functions"].values()), placed
+    from dread.emu import Layout
+    with open(os.path.join(target.build, "lift-check", image.name, "payload.bin"), "rb") as f:
+        payload = f.read()
+    spans = Layout(target, image).payload_spans(payload)
+    assert [(a, len(b)) for a, b in spans][0] == (image.base, end - image.base)
+    assert spans[1][0] == 0x08200000 and 0 < len(spans[1][1]) <= 0x10000 and len(spans) == 2

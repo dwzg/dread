@@ -67,7 +67,7 @@ IMAGE_KEYS = {
     "original": str, "vendor": str, "container": str, "base": int, "limit": int, "erased": int,
     "entry": (int, str), "config": str, "cases": str, "extra_cases": str, "kept_cases": str,
     "record_specs": str, "src": str, "startup": (list, dict), "tables": dict, "arch": dict, "vectors": int,
-    "free": list, "fixed": dict,
+    "free": list, "fixed": dict, "room": list,
 }
 FREE = ("models", "plugins", "scenarios", "boot")
 
@@ -466,6 +466,11 @@ class Image:
         for r in self._free:
             if not (isinstance(r, list) and len(r) == 2 and all(isinstance(v, int) for v in r) and r[0] < r[1]):
                 raise TargetError("%s: free takes ranges [start, end], not %r" % (where, r))
+        room = data.get("room")
+        if room is not None and not (isinstance(room, list) and len(room) == 2
+                                     and all(isinstance(v, int) for v in room) and room[0] < room[1]):
+            raise TargetError("%s: room takes one range [start, end], not %r" % (where, room))
+        self._room = tuple(room) if room else None
         self._payload = None
         self._copies = None
 
@@ -490,6 +495,32 @@ class Image:
     @property
     def limit(self):
         return self._limit if self._limit is not None else self.end
+
+    @property
+    def room(self):
+        """(start, end) of memory the device does not give the image, where the overlay may put the
+        C's own code when there is no room behind the image ([image] room), or None. It is for the
+        emulator alone: both images run with it mapped, the rebuilt one with the C in it, and a
+        rebuilt image that uses it does not run on the device. It lies above the image and its limit
+        and overlaps nothing of [memory]: no region, device range, stack or scratch."""
+        if self._room is None:
+            return None
+        lo, hi = self._room
+        where = "%s [image.%s]" % (self.target.file, self.name)
+        if lo < max(self.limit, self.end):
+            raise TargetError("%s: room 0x%x-0x%x lies below the image's end or limit 0x%x"
+                              % (where, lo, hi, max(self.limit, self.end)))
+        mem = self.target.memory
+        taken = [(r.base, r.end, "region " + r.name) for r in mem.regions] + \
+            [(a, b, "device range") for a, b in mem.io]
+        if mem.stack_top is not None:
+            taken.append((mem.stack_top - mem.stack_size, mem.stack_top, "the stack"))
+        if mem.scratch_base is not None:
+            taken.append((mem.scratch_base, mem.scratch_base + mem.scratch_size, "the scratch"))
+        for a, b, what in taken:
+            if a < hi and lo < b:
+                raise TargetError("%s: room 0x%x-0x%x overlaps %s (0x%x-0x%x)" % (where, lo, hi, what, a, b))
+        return self._room
 
     @property
     def free(self):

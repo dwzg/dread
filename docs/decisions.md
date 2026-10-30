@@ -5637,3 +5637,20 @@ twice.
 - **Taken: a page mapped and unmapped first**, in every layer's new_uc: a freed block switches Unicorn
   to QEMU's gap search for the engine's life, whatever is mapped later and in which order. One map and
   one unmap per engine.
+
+## C may go into memory the device does not have, for the emulator alone (2026-10-30)
+
+**Decided by the user** ("add the emulator only setting"). A firmware that runs from RAM with its
+data right behind its code has no room behind the image, and lifted C is larger than the original
+compiler's code: on a private firmware built with ARM's compiler more than half of what the lift
+check would have accepted was dropped for want of room alone.
+
+- **Smaller lifted C**: what fits stays runnable on the device, but most functions do not fit
+  whatever the C looks like, and the comparison does not need it.
+- **Taken: `[image] room`**, a range away from the image and from everything of `[memory]`, where the
+  overlay puts the C's own code when it has the most room. The payload reaches up to there, filled
+  between; the emulator (dread.emu.Layout payload_spans, and the system run) loads the image and the
+  room, not the filler, so the RAM between stays as the original's run has it. placement.json's
+  `emulator_only` and the report say that such an image does not run on the device.
+- **Undo**: leave the key out; the overlay and the emulator are then as before.
+

@@ -397,8 +397,11 @@ people), then a `#` summary line. Not for programs; they read placement.json.
 ```
 
 `placement` is one of `in place`, `over its pools`, `behind a pool`, `freed space`, `free space`
-(one of the image's free ranges, `[image] free`), `behind the image`, or `helper` (a C function the
-table does not have; no `entry`). The summary's `free_left` is what the free ranges still hold. `branch` says
+(one of the image's free ranges, `[image] free`), `behind the image`, `room` (the image's room,
+`[image] room`: the emulator's alone; since 2026-10-30), or `helper` (a C function the table does not
+have; no `entry`). The summary's `free_left` is what the free ranges still hold; `emulator_only`
+(since 2026-10-30; missing in older files: false) says the C's own code went into the image's room,
+so the payload reaches up to there and the rebuilt image does not run on the device. `branch` says
 that the old entry holds a branch to `address`, `branch_bytes` long (x86's jmp 5, RISC-V's auipc and jalr
 8, a narrow Thumb b 2); the test runner enters such a function through it. `via` and `via_bytes`: the
 trampoline a narrow branch goes through, and its branch's length. dread.sysrun counts none of these

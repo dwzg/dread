@@ -167,3 +167,25 @@ def test_risc_v_compiles_the_overlays_c_without_linker_relaxation(tmp_path):
     bare = Target.load(write(tmp_path / "rv", text.replace('"-mno-relax"', '"-Os"', 1))).compiler
     assert "-mno-relax" not in bare.cflags and "-mno-relax" in bare.required()
     assert "-mno-relax" not in Target.load(gizmo_dir("m3")).compiler.required()
+
+
+ROOMY = MINIMAL.replace("base = 0x1000", "base = 0x1000\nroom = %s") + """
+[memory]
+regions = [{name = "ram", base = 0x20000, size = 0x1000}]
+"""
+
+
+@pytest.mark.parametrize("room, message", [
+    ("[0x8000, 0x9000]", None),
+    ("[0x9000, 0x8000]", "room takes one range"),
+    ("[0x8000]", "room takes one range"),
+    ("[0x1008, 0x2000]", "lies below the image's end or limit"),
+    ("[0x1f000, 0x20800]", "overlaps region ram"),
+])
+def test_an_images_room(tmp_path, room, message):
+    """[image] room: one range above the image and its limit that overlaps nothing of [memory]."""
+    if message is None:
+        assert Target.load(write(tmp_path, ROOMY % room)).image().room == (0x8000, 0x9000)
+        return
+    with pytest.raises(TargetError, match=message):
+        Target.load(write(tmp_path, ROOMY % room)).image().room
