@@ -206,6 +206,8 @@ INDIRECT_STACK_WORDS = 4  # frame words a call through a register passes on as s
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+HANDBACK = "/*dread: handed back*/ "         # where a return writes back the registers handed in (_handed_back)
+
 class Refused(Exception):
     """The function uses something the translation does not model exactly."""
 
@@ -1924,9 +1926,18 @@ class Lifter:
         if ctx["switch"]:
             lines.append("    u32 index = 0;")
         lines.append("    (void)n; (void)z; (void)c; (void)v; (void)r12; (void)lr; (void)sp0;")
-        lines += body
+        lines += self._handed_back(body)
         lines.append("}")
         return "\n".join(lines) + "\n"
+
+    def _handed_back(self, body):
+        """The body with each return's HANDBACK mark replaced by the write-back of the registers handed in
+        that the body assigns (a register only read keeps what the caller left, and needs none)."""
+        handed = sorted(self.ctx.get("handed", ()), key=lambda r: int(r[1:]))
+        text = "\n".join(body)
+        changed = [r for r in handed if re.search(r"\b%s = " % r, text)]
+        back = "".join('__asm__ volatile ("mov %s, %%0" :: "r"(%s)); ' % (r, r) for r in changed)
+        return [line.replace(HANDBACK, back) for line in body]
 
     def _wide(self, name):
         flow = self.flow
@@ -2555,8 +2566,7 @@ class Lifter:
         stored into its area (more_results), the registers handed in written back (the C compiler keeps
         out of them, -ffixed-REG, so it restores nothing of them: what the original leaves there at its
         return, often what its epilogue restores, only the C puts there), the result returned."""
-        back = "".join('__asm__ volatile ("mov %s, %%0" :: "r"(%s)); ' % (r, r)
-                       for r in sorted(self.ctx.get("handed", ()), key=lambda r: int(r[1:])))
+        back = HANDBACK if self.ctx.get("handed") else ""      # (filled in by render: _handed_back)
         return self._fp_sync("out") + self._more_out() + back + "return %s;" % self._ret()
 
     def _more_out(self):
