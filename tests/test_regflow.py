@@ -1303,3 +1303,98 @@ def test_why_deep_follows_a_kept_register_to_where_it_is_used(tmp_path, capsys):
     assert lines == ["leaf\tr3\t\t%x" % adds, "wrap\tr3\t\t%x" % adds], lines
     assert regflow.main(["--target", str(tmp_path), "--ending", "%x" % (adds + 2)]) == 0
     assert [l for l in capsys.readouterr().out.splitlines() if not l.startswith("#")] == []
+
+
+COND_EXIT_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global flag, sel, tsel, other, same, top
+    .type flag, %function
+    .thumb_func
+flag:                       @ takes r1 only: 1 when r1 is zero, else r1 + 5
+    cmp     r1, #0
+    itt     eq
+    moveq   r0, #1
+    bxeq    lr
+    adds    r0, r1, #5
+    bx      lr
+    .size flag, . - flag
+    .type sel, %function
+    .thumb_func
+sel:                        @ r2 written under ne, a return under eq: the way on behind it has r2
+    cmp     r0, #0
+    ite     eq
+    moveq   r0, #7
+    addne   r2, r0, #1
+    it      eq
+    bxeq    lr
+    lsls    r0, r2, #1
+    bx      lr
+    .size sel, . - sel
+    .type other, %function
+    .thumb_func
+other:
+    adds    r0, r1, #1
+    bx      lr
+    .size other, . - other
+    .type tsel, %function
+    .thumb_func
+tsel:                       @ the same with a tail call under eq, whose callee reads the r1 written under eq
+    cmp     r0, #0
+    ite     eq
+    moveq   r1, #3
+    addne   r2, r0, #1
+    beq     other
+    lsls    r0, r2, #1
+    bx      lr
+    .size tsel, . - tsel
+    .type same, %function
+    .thumb_func
+same:                       @ against: r2 written under the return's own condition is no write behind it
+    cmp     r0, #0
+    itt     eq
+    moveq   r2, #1
+    bxeq    lr
+    lsls    r0, r2, #1
+    bx      lr
+    .size same, . - same
+    .type top, %function
+    .thumb_func
+top:
+    push    {r4, lr}
+    bl      flag
+    bl      sel
+    bl      tsel
+    bl      same
+    pop     {r4, pc}
+    .size top, . - top
+"""
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-ld")),
+                    reason="needs arm-none-eabi binutils")
+def test_a_conditional_way_out_hands_on_what_was_written_under_the_other_condition(tmp_path):
+    """regflow 35: a return or a tail call under a condition goes on behind it under the opposite one,
+    so what was written under that one is written on the way behind it (sel: addne r2; bxeq lr; lsls
+    r0, r2 reads no r2 of the caller), as for a branch inside the function (regflow 16); and a tail call
+    under a condition hands its callee what was written under it (tsel: moveq r1, #3; beq other: other's
+    r1 is tsel's own). Before, both read the caller's register: ARM's compiler returns and tail-calls so
+    under a condition, and every caller up the chain kept a register for a read that never happens.
+    What was written under the way out's own condition is no write behind it (same)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.target import Target
+    (tmp_path / "t.s").write_text(COND_EXIT_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "top", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    flow = regflow.analyse(Program(Target.load(str(tmp_path))))
+    assert {n: flow.read_regs(n) for n in ("flag", "sel", "tsel", "same")} == \
+        {"flag": ["r1"], "sel": ["r0"], "tsel": ["r0"], "same": ["r0", "r2"]}

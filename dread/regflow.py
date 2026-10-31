@@ -94,7 +94,7 @@ import sys
 from dread.arch import code_address
 from dread import target as tgt
 
-VERSION = 34                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 35                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -184,6 +184,12 @@ VERSION = 34                # 3: entry spills (variadic functions) are no use; 4
                             # made every function GCC -O2 aligned a loop in take its caller's esi)
                             # 34: x86's frames aligned at run time (and esp, -8) have the lifter's states
                             # (lift_x86 realigns), where every answer was the cautious one before
+                            # 35: a return or a tail call under a condition goes on behind it under the
+                            # opposite one, with what was written under that one (as 16 for a branch inside
+                            # the function), and a tail call under a condition hands its callee what was
+                            # written under it: ARM's compiler returns and tail-calls so under a condition
+                            # (tests: ite eq; moveq r0, #7; addne r2, r0, #1; it eq; bxeq lr), and every
+                            # caller up the chain kept a register for a read that never happens
 
 
 class RegFlow:
@@ -494,8 +500,8 @@ def _rows(program, fn, an, entry_name):
             covered = state.get(pred, 0)        # also what a predicated call's callee reads
             uses = rm & ~covered
             kills = wm & state.get(arch.complement(pred), 0)
-            if kind == "jump":                  # a conditional branch: what its fall-through edge knows written
-                fall_covered = state.get(arch.complement(pred), 0)
+            if kind in ("jump", "return"):      # a conditional branch or return: what its fall-through edge
+                fall_covered = state.get(arch.complement(pred), 0)      # knows written
             state[pred] = covered | wm
         demand = an.refinement(insn, reads, writes, pred is not None, rm) if rm else None
         out.append(Row(a, insn.size, kind, target, falls, uses, kills, wm, pred is not None, stack, writes, covered,
@@ -1161,15 +1167,21 @@ class Analysis:
         edge carries what was written under its condition since the flags last changed (it eq; ldreq
         r3, [r1]; beq L: r3 is written at L by that way), its fall-through edge what was written under
         the opposite condition. Where both ways lead to the same row, neither (the write is not
-        certain there)."""
+        certain there). A conditional return or branch out of the function (a tail call) has only its
+        fall-through edge here (ite eq; moveq r0, #7; addne r2, r0, #1; it eq; bxeq lr: r2 is written
+        behind the return; since regflow 35)."""
         index = {row.address: i for i, row in enumerate(code)}
         out = {}
         for i, row in enumerate(code):
-            if row.kind != "jump" or not row.conditional or not (row.covered or row.fall_covered):
+            if row.kind not in ("jump", "return") or not row.conditional or not (row.covered or row.fall_covered):
                 continue
-            taken = index.get(code_address(arch, row.target or 0))
+            taken = index.get(code_address(arch, row.target or 0)) if row.kind == "jump" else None
             fall = i + 1 if i + 1 < len(code) and code[i + 1].address == row.address + row.size else None
-            if taken is None or taken == fall:
+            if taken is None:               # (a way out of the function: only the fall-through stays in it)
+                if row.fall_covered and fall is not None and fall in succ[i]:
+                    out[(i, fall)] = row.fall_covered
+                continue
+            if taken == fall:
                 continue
             if row.covered and taken in succ[i]:
                 out[(i, taken)] = row.covered
@@ -1914,8 +1926,9 @@ class Analysis:
         for i in returns:
             exits[i] |= passed
         formats = self.formats
-        for i, callee in tails:
-            exits[i] |= self.reads[callee] | formats.get(code[i].address, 0) | (passed & ~self.may[callee])
+        for i, callee in tails:             # (under a condition: what was written under it is the function's own)
+            exits[i] |= (self.reads[callee] | formats.get(code[i].address, 0) | (passed & ~self.may[callee])) & \
+                ~code[i].covered
         for i, callee in calls:
             if callee is not None:      # (the call writes its link register before the callee reads it)
                 uses[i] |= (self.reads[callee] | formats.get(code[i].address, 0)) & ~code[i].covered & \
