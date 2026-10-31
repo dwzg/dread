@@ -73,7 +73,15 @@ keyed by the image, its tables, its startup copies, the ABI and the source of th
 dread.switches, dread.program's decoder, the arch layer and its package's helpers) as the process read it
 when it imported this module, not when it stores (a run that imported older code keys by that code).
 
-    dread regflow [--target DIR] [--image NAME] [--all] [--why] [--json FILE] [NAME...]
+--why names the instructions behind each kept register of the named functions; with --deep it follows
+each of them on, into a callee that reads the register at its entry, through calls that may hand the value
+back, returns and tail calls, to every instruction that may use the value in the end (Analysis.ends): what
+an argument that a kept register cannot matter (kept.tsv, docs/formats.md) has to cover. --ending ADDRESS...
+lists the kept registers whose value ends only at those instructions, as kept.tsv lines whose argument is
+still to be written (one cause and every function it explains).
+
+    dread regflow [--target DIR] [--image NAME] [--all] [--why [--deep]] [--ending ADDRESS...]
+                  [--json FILE] [NAME...]
 """
 import argparse
 import collections
@@ -345,16 +353,68 @@ def argued_path(image):
 
 def load_argued(image):
     """{(function, register): argument} from the image's kept.tsv: kept registers that are not
-    compared, each with the argument why the difference cannot matter."""
+    compared, each with the argument why the difference cannot matter (load_arguments without the
+    ends; argued_kept checks them)."""
+    return {key: argument for key, (argument, _) in load_arguments(image).items()}
+
+
+def load_arguments(image):
+    """{(function, register): (argument, ends)} from the image's kept.tsv: ends the set of addresses
+    of the instructions the argument covers (its fourth column, since 2026-10-31: every instruction
+    where the value may end up, as Analysis.ends finds them), or None where the line names none. A
+    line without an argument is no argument (dread regflow --ending writes them so, to be filled in)."""
     out = {}
     path = argued_path(image)
     if os.path.exists(path):
         with open(path) as f:
             for line in f:
                 fields = line.rstrip("\n").split("\t")
-                if len(fields) >= 3 and not line.startswith("#"):
-                    out[(fields[0].strip(), fields[1].strip())] = fields[2].strip()
+                if len(fields) >= 3 and fields[2].strip() and not line.startswith("#"):
+                    ends = None
+                    if len(fields) >= 4 and fields[3].strip():
+                        ends = frozenset(int(w, 16) for w in fields[3].split())
+                    out[(fields[0].strip(), fields[1].strip())] = (fields[2].strip(), ends)
     return out
+
+
+def ends_of(analysis, flow, name, reg):
+    """{address: (function, what, steps)} of every instruction where the value of `reg` that `name`
+    leaves at its return may end up: Analysis.ends over the call sites behind the kept register
+    (address 0 for a site that stands for others, such as the ABI: no instruction an argument names)."""
+    found = {}
+    if reg not in analysis.bit:             # (no register the analysis follows: nothing ends anywhere)
+        return found
+    for caller, address in flow.sites_of(name, reg):
+        if caller not in analysis.rows:
+            found.setdefault(0, (caller, "abi", []))
+            continue
+        for (fn, at, what), steps in analysis.ends(caller, address, reg).items():
+            found.setdefault(at, (fn, what, steps))
+    return found
+
+
+def argued_kept(program, flow, image):
+    """(applied, lapsed) from the image's kept.tsv. applied: {(function, register): argument}, the
+    arguments that hold; lapsed: {(function, register): (argument, [addresses])} of the arguments that
+    name the instructions they cover (load_arguments' ends) while the value may end up at others too
+    (ends_of): the register is compared again, an argument does not stretch over what it was not made
+    for. An argument without ends applies as written (older files). The analysis is made only where
+    some line names ends."""
+    arguments = load_arguments(image)
+    applied, lapsed = {}, {}
+    checked = {key: value for key, value in arguments.items() if value[1] is not None}
+    analysis = Analysis(program).solve(compared=True) if checked else None
+    for key, (argument, ends) in sorted(arguments.items()):
+        if ends is None:
+            applied[key] = argument
+            continue
+        found = ends_of(analysis, flow, *key) if key[0] in analysis.rows else {}
+        extra = sorted(set(found) - ends)
+        if extra:
+            lapsed[key] = (argument, extra)
+        else:
+            applied[key] = argument
+    return applied, lapsed
 
 
 Row = collections.namedtuple("Row", "address size kind target falls uses kills writes conditional stack written covered "
@@ -2335,6 +2395,101 @@ class Analysis:
             stack.extend(succ[j])
         return sorted(out)
 
+    def ends(self, name, address, reg):
+        """Every instruction that may use the value `reg` holds after the call (or tail call) at `address`
+        in function `name` (dread regflow --why --deep): readers() followed to the end. A call whose callee
+        reads the register at its entry leads into the callee, down to its own instructions; a call goes
+        on behind it unless its callee writes the register on every path (_must_write); a return leads to
+        every call of the function, a tail call into its callee and, where the callee may hand the value
+        back, to the function's callers; a save (_neutral_saves) goes on behind its restore; a read goes
+        on to later reads where the instruction does not write the register. A callee entered so returns
+        to the call that entered it (the walk goes on behind that call), not to its other callers.
+        {(function, address, what): steps}: what is "read" for an instruction's own read, "handed" for
+        what goes where the analysis cannot follow (an indirect call's or a variadic function's
+        arguments: _handed), "format" for an argument a printf format takes (formats); steps the first
+        path found to it, [(function, address)] of the calls, returns and tail calls on the way. Errs on
+        the side of finding more than readers(): it does not establish that a path can run. What the
+        analysis does not see it does not follow either: the callee of an indirect call (taken to end
+        every scratch register, as solve takes it), code the function table does not cover."""
+        if getattr(self, "_calls_to", None) is None:
+            calls_to, tails_to = collections.defaultdict(list), collections.defaultdict(list)
+            for f, (_, _, calls, tails, _) in self.graphs.items():
+                for i, c in calls:
+                    if c is not None:
+                        calls_to[c].append((f, i))
+                for i, c in tails:
+                    if c is not None:
+                        tails_to[c].append((f, i))
+            self._calls_to = (calls_to, tails_to)
+        calls_to, tails_to = self._calls_to
+        must = self._must_write()
+        b = self.bit[reg]
+        out, seen, work = {}, set(), []
+
+        def onward(f, i, up, steps):
+            succ = self.graphs[f][0]
+            edges = self.edges.get(f, {})
+            for k in succ[i]:
+                if not edges.get((i, k), 0) & b:
+                    work.append((f, k, up, steps))
+
+        def returned(f, steps):
+            """The value leaves f by a return (or a tail call that hands it back): at every call of f."""
+            if ("return", f) in seen:
+                return
+            seen.add(("return", f))
+            for g, i in calls_to.get(f, ()):
+                onward(g, i, True, steps + [(g, self.rows[g][i].address)])
+            for g, i in tails_to.get(f, ()):
+                returned(g, steps + [(g, self.rows[g][i].address)])
+
+        code = self.rows[name]
+        start = {row.address: i for i, row in enumerate(code)}[address]
+        if start in dict(self.graphs[name][3]):
+            returned(name, [(name, address)])
+        else:
+            onward(name, start, True, [(name, address)])
+        while work:
+            f, j, up, steps = work.pop()
+            if (f, j, up) in seen:
+                continue
+            seen.add((f, j, up))
+            code = self.rows[f]
+            uses, kills, _ = self.final(f)
+            _, returns, calls, tails, _ = self.graphs[f]
+            row = code[j]
+            callee, tail = dict(calls).get(j), dict(tails).get(j)
+            if uses[j] & b:
+                for what, bits in (("read", row.uses), ("handed", self.handed.get(f, {}).get(j, 0)),
+                                   ("format", self.formats.get(row.address, 0))):
+                    if bits & uses[j] & b:
+                        out.setdefault((f, row.address, what), steps)
+                if callee is not None and self.reads[callee] & b:
+                    work.append((callee, 0, False, steps + [(f, row.address)]))
+            if callee is not None:
+                if row.conditional or not must.get(callee, 0) & b:
+                    onward(f, j, up, steps)
+                continue
+            if tail is not None:
+                if self.reads[tail] & b:
+                    work.append((tail, 0, False, steps + [(f, row.address)]))
+                if up and not must.get(tail, 0) & b:
+                    returned(f, steps + [(f, row.address)])
+                if not row.conditional:
+                    continue
+            if kills[j] & b:
+                continue
+            copy = self.copies.get(f, {}).get(j)
+            if copy is not None and copy[1] & b:
+                onward(f, copy[0], up, steps)
+            if j in returns:
+                if up:
+                    returned(f, steps + [(f, row.address)])
+                if not row.conditional:
+                    continue
+            onward(f, j, up, steps)
+        return out
+
 
 def analyse(program):
     """RegFlow of a Program (see the module's docstring): the program's own view of the first result
@@ -2436,6 +2591,12 @@ def main(argv=None):
     parser.add_argument("--all", action="store_true", help="every function's reads and kept")
     parser.add_argument("--why", action="store_true",
                         help="for the named functions: the instructions behind each kept register")
+    parser.add_argument("--ending", nargs="+", metavar="ADDRESS",
+                        help="the kept registers whose value ends only at these instructions (hex; --why "
+                        "--deep's list within them), as kept.tsv lines whose argument is still to be written")
+    parser.add_argument("--deep", action="store_true",
+                        help="with --why: follow each read on through calls, returns and tail calls, to every "
+                        "instruction that may use the value in the end (Analysis.ends)")
     parser.add_argument("--json", metavar="FILE", help="also write every function's facts (or the named ones') to "
                         "FILE as JSON (docs/formats.md)")
     parser.add_argument("names", nargs="*")
@@ -2454,10 +2615,22 @@ def main(argv=None):
             print("dread regflow: no function %s" % ", ".join(missing), file=sys.stderr)
             return 2
         write_json(args.json, json_record(flow, names, result))
+    if args.deep and not args.why:
+        parser.error("--deep goes with --why")
+    if args.ending:
+        try:
+            within = {int(a, 16) for a in args.ending}
+        except ValueError:
+            parser.error("--ending takes addresses in hex")
+    if args.ending:
+        from dread.program import Program
+        print_ending(Analysis(Program(target, image)).solve(compared=True), flow, names, result, within)
+        return 0
     analysis = None
     if args.why:
         from dread.program import Program
         analysis = Analysis(Program(target, image)).solve(compared=True)
+        arguments = load_arguments(image) if args.deep else {}
     for name in names:
         kept = flow.kept_regs(name)
         extra = [r for r in kept if r != result]
@@ -2484,10 +2657,57 @@ def main(argv=None):
                     else:
                         text = "passed on by the tail call at 0x%x to %s" % (what[1], what[2])
                     print("        after %s 0x%x: %s" % (caller, address, text))
+            if args.deep:
+                print_ends(analysis, flow, name, reg, arguments)
     if not args.names:
         print("dread regflow: %d functions keep a register besides %s for their callers"
               % (sum(1 for n in flow.kept if [r for r in flow.kept_regs(n) if r != result]), result))
     return 0
+
+
+def print_ends(analysis, flow, name, reg, arguments):
+    """dread regflow --why --deep: every instruction where the value of `reg` that `name` leaves at its
+    return may end up (ends_of), by address, each with the first path found to it; and whether the
+    image's kept.tsv argues the register and covers them (argued_kept)."""
+    found = ends_of(analysis, flow, name, reg)
+    print("        in the end (--deep), %d instruction%s:" % (len(found), "" if len(found) == 1 else "s"))
+    if (name, reg) in arguments:
+        argument, ends = arguments[(name, reg)]
+        if ends is None:
+            print("        kept.tsv argues it, naming no instructions: %s" % argument)
+        else:
+            extra = sorted(set(found) - ends)
+            print("        kept.tsv argues it%s: %s" % (", but does not cover " + " ".join("0x%x" % a for a in extra)
+                                                    if extra else ", covering all of them", argument))
+    for address, (fn, what, steps) in sorted(found.items()):
+        if what == "abi":
+            print("            %s: read after every call" % fn)
+            continue
+        insn = analysis.program.insn(address)
+        text = "%s %s" % (insn.mnemonic, insn.op_str) if insn is not None else "?"
+        how = {"read": "", "handed": " (handed on where the analysis cannot follow)",
+               "format": " (an argument its printf format takes)"}[what]
+        path = " > ".join("%s 0x%x" % step for step in steps)
+        print("            0x%x in %s: %s%s, after %s" % (address, fn, text.strip(), how, path))
+
+
+def print_ending(analysis, flow, names, result, within):
+    """dread regflow --ending: kept.tsv lines (function, register, an argument to be written, ends) for
+    every kept register of the named functions (default all) besides the result whose value ends only
+    at instructions among `within` (ends_of), the functions in name order: one cause, such as an
+    uninitialised variable that every caller up a chain keeps a register for, and the functions it
+    explains. The argument is judgement, not this tool's: a line without one does not apply."""
+    print("# function\tregister\targument (to be written: a line without one does not apply)\tends")
+    count = 0
+    for name in names:
+        for reg in flow.kept_regs(name):
+            if reg == result:
+                continue
+            found = ends_of(analysis, flow, name, reg)
+            if found and set(found) <= within:
+                print("%s\t%s\t\t%s" % (name, reg, " ".join("%x" % a for a in sorted(found))))
+                count += 1
+    print("# %d kept register%s end%s only there" % (count, "" if count == 1 else "s", "s" if count == 1 else ""))
 
 
 def json_record(flow, names, result):

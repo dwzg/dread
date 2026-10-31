@@ -5654,3 +5654,25 @@ check would have accepted was dropped for want of room alone.
   `emulator_only` and the report say that such an image does not run on the device.
 - **Undo**: leave the key out; the overlay and the emulator are then as before.
 
+## kept.tsv's arguments name what they cover (2026-10-31)
+
+**Decided by recommendation**, after the user's principle (2026-10-30: a comparison may be weakened
+where there is a valid reason, only with justification). On a private firmware a callee read a
+register its source never set (an uninitialised variable), and every function up the chain kept
+that register for it: lifted C failed "after the return" for every function up the chain, all for one cause.
+kept.tsv takes such a register out of a function's comparison with an argument; until now the
+argument was free text, checked by nobody, and it went on applying when the analysis later found
+the value used elsewhere.
+
+- **Free text, as before**: an argument checked once, by whoever wrote it, against what regflow said
+  then.
+- **Taken: the argument names the instructions it covers** (a fourth column, ends), and the runner
+  applies it only while dread.regflow's Analysis.ends finds the value used nowhere else; otherwise the
+  register is compared again and its failure says why. `dread regflow --why --deep` lists where a
+  kept register's value ends up (through calls whose callee reads it at its entry, returns and tail
+  calls), `--ending` lists every kept register that ends only at given instructions, as lines whose
+  argument is still to be written; a line without an argument does not apply. The argument itself
+  stays judgement.
+- **Undo**: leave the fourth column out (the line applies as written); argued_kept then builds no
+  analysis.
+

@@ -128,6 +128,20 @@ def test_a_clobbered_kept_register_fails(target, variant, tmp_path, capsys, monk
     monkeypatch.setattr(regflow, "argued_path", lambda image: str(kept))
     failed, uncovered, text = run_all(target, payload, names=["uart_putc"])
     assert not failed and "r1 at the return not compared (kept.tsv): the planted change" in text, text
+    # an argument that names the instructions it covers applies while they are all where r1 ends up
+    # (regflow.argued_kept), and lapses where they are not: r1 is compared again, and the result says why
+    from dread.program import Program
+    program = Program(target)
+    ends = regflow.ends_of(regflow.Analysis(program).solve(compared=True), regflow.load(target, target.image()),
+                           "uart_putc", "r1")
+    assert ends and all(fn == "uart_puts" for fn, _, _ in ends.values()), ends
+    kept.write_text("uart_putc\tr1\tthe planted change, argued for the test\t%s\n" % " ".join("%x" % a for a in ends))
+    failed, uncovered, text = run_all(target, payload, names=["uart_putc"])
+    assert not failed and "r1 at the return not compared (kept.tsv)" in text, text
+    entry = program.by_name["uart_putc"].entry
+    kept.write_text("uart_putc\tr1\tthe planted change, argued for the test\t%x\n" % entry)
+    failed, uncovered, text = run_all(target, payload, names=["uart_putc"])
+    assert failed and "r1 after the return" in text and "kept.tsv's argument does not cover" in text, text
     monkeypatch.undo()
     # through the caller it shows only for strings of two or more characters: all generated inputs,
     # while uart_puts is the original's code; lifted, it keeps its r1 across the call itself (the C's
@@ -1170,3 +1184,122 @@ def test_registers_a_function_overwrites(tmp_path):
     again = regflow.RegFlow.from_json(json.loads(json.dumps(flow.to_json())))
     assert again.overwritten_regs("gauge_via") == flow.overwritten_regs("gauge_via")
     assert regflow.RegFlow.from_json(flow.case_facts()).overwritten_regs("gauge_now") == []   # (a cache before 25)
+
+
+DEEP_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global use, mid, leaf, wrap, tail_mid, top
+    .type use, %function
+    .thumb_func
+use:                        @ reads its caller's r3 only when r0 is neither 1 nor 2 (an uninitialised
+    cmp     r0, #1          @ variable of the source)
+    itt     eq
+    moveq   r3, #10
+    beq     1f
+    cmp     r0, #2
+    it      eq
+    moveq   r3, #20
+1:  adds    r0, r3, #1
+    bx      lr
+    .size use, . - use
+    .type mid, %function
+    .thumb_func
+mid:                        @ hands its caller's r3 to use
+    push    {r4, lr}
+    bl      use
+    pop     {r4, pc}
+    .size mid, . - mid
+    .type leaf, %function
+    .thumb_func
+leaf:                       @ leaves r3, which top reads (through wrap's return, tail_mid and mid)
+    movs    r3, #7
+    movs    r0, #0
+    bx      lr
+    .size leaf, . - leaf
+    .type wrap, %function
+    .thumb_func
+wrap:
+    push    {r4, lr}
+    bl      leaf
+    pop     {r4, pc}
+    .size wrap, . - wrap
+    .type tail_mid, %function
+    .thumb_func
+tail_mid:
+    b       mid
+    .size tail_mid, . - tail_mid
+    .type top, %function
+    .thumb_func
+top:
+    push    {r4, lr}
+    bl      wrap
+    bl      tail_mid
+    pop     {r4, pc}
+    .size top, . - top
+"""
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-ld")),
+                    reason="needs arm-none-eabi binutils")
+def test_why_deep_follows_a_kept_register_to_where_it_is_used(tmp_path, capsys):
+    """--why names the instruction behind a kept register, which may be a call whose callee reads the
+    register at its entry: leaf's r3 goes back through wrap's return to top, which hands it on by a call
+    of tail_mid, a tail call to mid and mid's call to use. --why --deep (Analysis.ends) follows it to
+    the instruction that uses it, use's adds, with the path there: what an argument that leaf's r3 cannot
+    matter (kept.tsv) has to cover."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.target import Target
+    (tmp_path / "t.s").write_text(DEEP_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "top", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    program = Program(Target.load(str(tmp_path)))
+    flow = regflow.analyse(program)
+    assert "r3" in flow.kept_regs("leaf") and "r3" in flow.read_regs("use")
+    adds = next(a for a in program.by_name["use"].insns if program.insn(a).mnemonic.startswith("adds"))
+    analysis = regflow.Analysis(program).solve(compared=True)
+    (site,) = flow.sites_of("leaf", "r3")
+    ends = analysis.ends(*site, "r3")
+    assert set(ends) == {("use", adds, "read")}, ends
+    steps = [name for name, _ in ends[("use", adds, "read")]]
+    assert steps == ["wrap", "wrap", "top", "top", "tail_mid", "mid"], ends
+    # what use reads of its own entry (its r0), and r3 where use itself wrote it, are no ends of leaf's r3
+    assert regflow.main(["--target", str(tmp_path), "--why", "--deep", "leaf"]) in (0, None)
+    out = capsys.readouterr().out
+    assert "in the end (--deep), 1 instruction:" in out and "0x%x in use: adds r0, r3, #1" % adds in out, out
+    with pytest.raises(SystemExit):
+        regflow.main(["--target", str(tmp_path), "--deep", "leaf"])
+    # kept.tsv: an argument naming no instructions applies as written; one naming every instruction where
+    # the value ends up applies; one that misses one lapses (regflow.argued_kept)
+    kept = tmp_path / "tests" / "kept.tsv"
+    kept.parent.mkdir(exist_ok=True)
+    image = Target.load(str(tmp_path)).image()
+    assert regflow.argued_path(image) == str(kept)
+    for ends, applies in (("", True), ("%x" % adds, True), ("%x %x" % (adds, adds + 2), True), ("%x" % (adds + 2), False)):
+        kept.write_text("# function\tregister\targument\tends\nleaf\tr3\tuse reads it only where r0 is neither 1 nor 2"
+                        "\t%s\n" % ends)
+        applied, lapsed = regflow.argued_kept(program, flow, image)
+        assert (("leaf", "r3") in applied) == applies and (("leaf", "r3") in lapsed) != applies, (ends, applied, lapsed)
+        if not applies:
+            assert lapsed[("leaf", "r3")][1] == [adds]
+    regflow.main(["--target", str(tmp_path), "--why", "--deep", "leaf"])
+    assert "kept.tsv argues it, but does not cover 0x%x" % adds in capsys.readouterr().out
+    # a line without an argument does not apply; --ending writes such lines for every kept register whose
+    # value ends only at the given instructions (leaf's, and wrap's, whose return hands leaf's on: the chain
+    # one cause explains), and none for an address where nothing ends
+    kept.write_text("leaf\tr3\t\t%x\n" % adds)
+    assert regflow.argued_kept(program, flow, image) == ({}, {})
+    assert regflow.main(["--target", str(tmp_path), "--ending", "%x" % adds]) == 0
+    lines = [l for l in capsys.readouterr().out.splitlines() if not l.startswith("#")]
+    assert lines == ["leaf\tr3\t\t%x" % adds, "wrap\tr3\t\t%x" % adds], lines
+    assert regflow.main(["--target", str(tmp_path), "--ending", "%x" % (adds + 2)]) == 0
+    assert [l for l in capsys.readouterr().out.splitlines() if not l.startswith("#")] == []

@@ -36,7 +36,11 @@ changing a table, case or report format.
    cases, images and reports. Caches are keyed by content and diffs have to mean something. A
    result that depends on wall-clock time or machine speed says so in its documentation.
 6. **Never weaken a comparison.** An option may add to what is compared, never take away. A
-   disagreement between two images is traced to its instruction before anything is concluded.
+   disagreement between two images is traced to its instruction before anything is concluded. What
+   a target takes out of one function's comparison needs a justification that a tool checks:
+   kept.tsv's argued registers, each naming the instructions it covers, and dread mutate's argued
+   survivors (the user, 2026-10-30: "if certain cases have a valid reason to weaken a comparison, we
+   should be able to have them. Of course only with justification").
 7. **Say what is not known.** Write "not confirmed" or "unknown" rather than a guess presented as
    fact, in docs, docstrings and commit messages.
 8. **Process in code, models only for judgement** (the user's principle). Whatever a tool can decide,

@@ -115,16 +115,25 @@ def generated_cases(name, fn):
 def kept_for(name):
     """(registers, why, argued) for a function: the scratch registers its callers read after the
     call (dread.regflow), to compare at the return besides the result; argued: those left out by
-    an argument in the image's kept.tsv, {register: argument}."""
+    an argument in the image's kept.tsv, {register: argument}. An argument that names the
+    instructions it covers and does not cover them all (regflow.argued_kept) leaves its register
+    compared, and its why says so."""
     flow = RUN.get("regflow")
     if flow is None:
         return (), {}, {}
     result = RUN["target"].abi.result[:1]
     arguments = RUN.get("kept_argued", {})
+    lapsed = RUN.get("kept_lapsed", {})
     regs = [r for r in flow.kept_regs(name) if r not in result]
     argued = {r: arguments[(name, r)] for r in regs if (name, r) in arguments}
     regs = tuple(r for r in regs if r not in argued)
-    return regs, {r: flow.why(name, r) for r in regs}, argued
+    why = {}
+    for r in regs:
+        why[r] = flow.why(name, r)
+        if (name, r) in lapsed:             # (an argument of kept.tsv that does not cover where it ends)
+            why[r] += "; kept.tsv's argument does not cover %s (dread regflow --why --deep)" % \
+                " ".join("0x%x" % a for a in lapsed[(name, r)][1][:6])
+    return regs, why, argued
 
 
 def _original():
@@ -723,13 +732,13 @@ def prepare(target, image, recon_path, keep_failing=False):
     Machine.entries[(target.file, image.name)] = {fn.entry for fn in prog.functions}
     from dread import regflow
     flow = regflow.load(target, image, prog)
-    kept_argued = regflow.load_argued(image)
+    kept_argued, kept_lapsed = regflow.argued_kept(prog, flow, image)
     RUN.clear()
     RUN.update(system=system, bodies=bodies)
     RUN.update(target=target, image=image, program=prog, layout=layout, suite=suite, original=image.payload(),
                recon=recon, aliases=aliases, built=built, keep_failing=keep_failing,
                isa_of=prog.isa_at, code=prog.instruction_halves(), owners=prog.extent_owners(), regflow=flow,
-               kept_argued=kept_argued, placed=placed)
+               kept_argued=kept_argued, kept_lapsed=kept_lapsed, placed=placed)
     if suite.auto:                          # the generated cases' keys (dread.autocase's environment): their
         from dread import autocase          # digests found once here, before the workers fork, not in each
         try:

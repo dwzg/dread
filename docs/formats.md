@@ -503,9 +503,24 @@ when the line changes.
 
 Registers that `dread regflow` finds read by callers after a call, but whose difference at the
 return cannot matter, with the argument why: tab-separated `function`, `register` (`r1`, `r12`,
-`flags`, ...), and the argument. `dread test` and `dread integration` do not compare that register
-at that function's return and list the argument under the function's result. Typical arguments: the
-caller reads it only on a path that cannot happen, or only bits the next callee ignores.
+`flags`, ...), the argument, and since 2026-10-31 optionally `ends`: the addresses of the
+instructions the argument covers, hex, separated by spaces. `dread test` and `dread integration` do
+not compare that register at that function's return and list the argument under the function's
+result. Typical arguments: the caller reads it only on a path that cannot happen, or only bits the
+next callee ignores.
+
+An argument covers every instruction where the value may end up, not only the first read behind
+the call: `dread regflow --why --deep NAME` lists them (through calls whose callee reads the
+register at its entry, returns and tail calls), each with a path to it. One argument per function,
+written after its own list was checked, never copied over functions whose list was not. A line with
+ends applies only while every instruction where the value may end up is among them (dread.regflow
+argued_kept): where the analysis finds another (a new function, a changed table), the register is
+compared again and its failure says that the argument does not cover it. A line without ends (older
+files: three columns) applies as written; a line without an argument does not apply (since
+2026-10-31; before, an empty argument applied). `dread regflow --ending ADDRESS...` writes such lines,
+with ends and without an argument, for every kept register whose value ends only at the given
+instructions: one cause, such as a callee that reads a register its source never set, and every
+function up the chain that keeps the register for it.
 
 ### `tests.tsv`
 
