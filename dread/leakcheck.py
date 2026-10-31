@@ -77,9 +77,67 @@ def collapsed(text):
     return " ".join(text.lower().split())
 
 
-def scan(text, names, addresses, words):
+LITERAL = re.compile(r"(?:\\.|[^\\.^$*+?{}\[\]|()])*")
+PREFIX = 8
+
+
+def _literal(pattern):
+    """The text a pattern matches when it is a plain literal (only escaped or ordinary characters),
+    else None."""
+    if not LITERAL.fullmatch(pattern):
+        return None
+    return re.sub(r"\\(.)", r"\1", pattern)
+
+
+def _trie_pattern(texts):
+    """An expression for literal texts of one length, built as a trie (texts sharing a prefix share
+    its characters; Python's re does not optimise a long alternation itself). The depth is the
+    length, so it stays small."""
+    trie = {}
+    for t in texts:
+        node = trie
+        for ch in t:
+            node = node.setdefault(ch, {})
+
+    def build(node):
+        if not node:
+            return ""
+        alts = [re.escape(ch) + build(child) for ch, child in sorted(node.items())]
+        return alts[0] if len(alts) == 1 else "(?:" + "|".join(alts) + ")"
+    return build(trie)
+
+
+def prefilter(words):
+    """A function from a text to the words that can match in it, in the words' order. A literal word
+    of PREFIX characters or more can match only where its first PREFIX characters stand (case
+    ignored); one lookahead pass finds every position's PREFIX characters that begin some word, and
+    only those words then run, each on its own as before, so the hits are the same as running every
+    word (a joined expression alone would report one of two overlapping words and could hide the one
+    that is not allowed). Other words (expressions, short literals) always run. None for no words."""
+    if not words:
+        return None
+    by_prefix, always = {}, []
+    for k, w in enumerate(words):
+        t = _literal(w.pattern)
+        if t is not None and len(t) >= PREFIX:
+            by_prefix.setdefault(t[:PREFIX].lower(), []).append(k)
+        else:
+            always.append(k)
+    if not by_prefix:
+        return lambda text: words
+    finder = re.compile("(?=(%s))" % _trie_pattern(by_prefix), re.I | re.S)
+
+    def candidates(text):
+        ks = set(always)
+        for m in finder.finditer(text):
+            ks.update(by_prefix[m.group(1).lower()])
+        return [words[k] for k in sorted(ks)]
+    return candidates
+
+
+def scan(text, names, addresses, words, select=None):
     hits = set()
-    for word in words:
+    for word in (select(text) if select else words):
         for m in word.finditer(text):
             hits.add(collapsed(m.group(0)))
     hits |= set(IDENT.findall(text)) & names
@@ -89,12 +147,12 @@ def scan(text, names, addresses, words):
     return hits
 
 
-def found(text, names, addresses, words):
+def found(text, names, addresses, words, select=None):
     """{hit: [the lines it is on, from 1]}: scan's hits (words in lower case, names as written, addresses'
     hex text in lower case) with where they are, for --json (scan alone is quicker)."""
     import bisect
     hits = {}
-    for word in words:
+    for word in (select(text) if select else words):
         for m in word.finditer(text):
             hits.setdefault(collapsed(m.group(0)), []).append(m.start())
     for m in IDENT.finditer(text):
@@ -154,6 +212,7 @@ def main(argv=None):
     if args.words:
         with open(args.words) as f:
             words = [re.compile(line.strip(), re.I) for line in f if line.strip() and not line.startswith("#")]
+    select = prefilter(words)
     allowed = set()
     if args.allow:
         with open(args.allow) as f:
@@ -166,7 +225,7 @@ def main(argv=None):
               "hits": [], "history_hits": [], "authors": None}
     for path, text in text_files(tree):
         rel = os.path.relpath(path, tree)
-        hits = found(text, names, addresses, words) if args.json else scan(text, names, addresses, words)
+        hits = found(text, names, addresses, words, select) if args.json else scan(text, names, addresses, words, select)
         for hit in sorted(hits):
             ok = hit.lower() in allowed or ("%s:%s" % (rel, hit)).lower() in allowed
             print("%s %s: %s" % ("allowed" if ok else "HIT", rel, hit))
@@ -187,7 +246,7 @@ def main(argv=None):
             if line.startswith("diff --git "):
                 path = line.split(" b/", 1)[1] if " b/" in line else None
                 continue
-            for hit in sorted(scan(line, names, addresses, words)):
+            for hit in sorted(scan(line, names, addresses, words, select)):
                 ok = hit.lower() in allowed or (path and ("%s:%s" % (path, hit)).lower() in allowed)
                 if not ok and (commit, hit) not in seen:
                     seen.add((commit, hit))

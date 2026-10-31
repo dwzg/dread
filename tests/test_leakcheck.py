@@ -135,3 +135,26 @@ def test_a_word_matched_across_lines_is_one_hit_its_allow_entry_one_line(tmp_pat
     out = capsys.readouterr().out
     assert rc == 0 and "allowed notes.md: widget was measured at ten units" in out, out
 
+
+
+def test_joined_words_only_filter_overlapping_hits_stay(tmp_path, capsys):
+    """The joined expression only skips text no word matches: an allowed longer word must not hide a
+    shorter one inside it that is not allowed."""
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "a.md").write_text("a line with LongerAllowedSecretName in it\nnothing here\n")
+    tables = tmp_path / "functions.tsv"
+    tables.write_text("address\tname\n")
+    words = tmp_path / "words.txt"
+    words.write_text("LongerAllowedSecretName\nSecretName\n")
+    allow = tmp_path / "allow.txt"
+    allow.write_text("longerallowedsecretname\n")
+    from dread import leakcheck
+    import re
+    words_c = [re.compile(w, re.I) for w in ["LongerAllowedSecretName", "SecretName", r"a\.b+c", "short"]]
+    select = leakcheck.prefilter(words_c)
+    # only the words whose first characters stand in the text, plus every expression and short word
+    assert [w.pattern for w in select("xx secretnamE yy")] == ["SecretName", r"a\.b+c", "short"]
+    code = leakcheck.main(["--tree", str(tree), "--tables", str(tables), "--words", str(words), "--allow", str(allow)])
+    out = capsys.readouterr().out
+    assert code == 1 and "secretname" in out.lower()
