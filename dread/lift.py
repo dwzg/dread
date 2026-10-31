@@ -1239,7 +1239,7 @@ class Lifter:
 
     # ---- the frame's top: the saves the C leaves out ----
 
-    def saves_out(self, fn, states, handler=None):
+    def saves_out(self, fn, states, handler=None, handed=()):
         """The bytes at the top of fn's frame, right below the entry's stack pointer, that the C's frame
         array leaves out (render: sp0 lies that far above the array's end): the longest run of words
         from there down that only whole-word stores and whole-word loads touch, each load's register
@@ -1250,7 +1250,10 @@ class Lifter:
         (FreeRTOS's RISC-V clang builds: most frames grew by exactly the saves). 0 when an address of
         the frame may reach what the analysis does not see (frame_uses, FrameReach: one is handed to a
         call, stored or returned, an access lands where the states do not know), whatever it would
-        reach; the frame of a wrapped function is the real stack and keeps everything (lift)."""
+        reach; the frame of a wrapped function is the real stack and keeps everything (lift). A restore
+        into a register handed in (handed: compiled with -ffixed-REG, so the C compiler saves nothing of
+        it) is never left out: the function's caller gets back what the original's restore puts there,
+        and only the C can put it there (_return writes it back)."""
         w = self.arch.word
         top = max((st[0] for st in states.values()), default=0)
         if top < w:
@@ -1264,7 +1267,9 @@ class Lifter:
         index = {a: i for i, a in enumerate(fn.insns)}
         kept = set()                        # words (by the depth of their lowest byte) the C keeps
         for a, k, size, kind, reg, nofetch in uses:
-            if size == w and k % w == 0 and (kind == "store" or kind == "load" and (nofetch or (
+            if reg in handed and kind == "load":
+                pass                        # (what the restore leaves is the caller's: kept, translated)
+            elif size == w and k % w == 0 and (kind == "store" or kind == "load" and (nofetch or (
                     reg is not None and self.restore_dead(fn, states, index, a, reg, results, fp)))):
                 continue
             word = ((k - size) // w + 1) * w    # every word the access covers a byte of
@@ -1624,7 +1629,7 @@ class Lifter:
             raise Refused("it takes %d stack words" % stack_params)
         frame = (max(depth.values()) + 7) & ~7
         wrapped = getattr(self, "_wrapping", False)
-        out = 0 if wrapped else self.saves_out(fn, states, handler)     # (a wrapped frame is the real stack)
+        out = 0 if wrapped else self.saves_out(fn, states, handler, handed)     # (a wrapped frame is the real stack)
         more = [] if handler else self.more_results(fn.name)
         if more and stack_params:           # (lift wraps such a function: its stack arguments as they lie)
             raise Refused("its callers read %s, which it sets, and it takes stack arguments, which an entry "
@@ -2547,8 +2552,12 @@ class Lifter:
 
     def _return(self):
         """The C of a return: s0-s15 handed back (FPU_MIRROR), the registers the naked entry hands back
-        stored into its area (more_results), the result returned."""
-        return self._fp_sync("out") + self._more_out() + "return %s;" % self._ret()
+        stored into its area (more_results), the registers handed in written back (the C compiler keeps
+        out of them, -ffixed-REG, so it restores nothing of them: what the original leaves there at its
+        return, often what its epilogue restores, only the C puts there), the result returned."""
+        back = "".join('__asm__ volatile ("mov %s, %%0" :: "r"(%s)); ' % (r, r)
+                       for r in sorted(self.ctx.get("handed", ()), key=lambda r: int(r[1:])))
+        return self._fp_sync("out") + self._more_out() + back + "return %s;" % self._ret()
 
     def _more_out(self):
         """The stores of more_results into the area of the entry that hands them back, or ""."""
@@ -2793,7 +2802,7 @@ class Lifter:
         slots = self.ldm_slots(insn, st[0], st[1])
         if slots is None or insn.writeback:
             raise Refused("0x%x: %s %s is not modelled" % (insn.address, insn.mnemonic, insn.op_str))
-        keep = set(self.results(self.ctx["fn"])) if returning else None
+        keep = set(self.results(self.ctx["fn"])) | set(self.ctx.get("handed", ())) if returning else None
         out = []
         for r, key in slots:
             if r in ("sp", "pc") or (keep is not None and r not in keep):
@@ -2823,11 +2832,12 @@ class Lifter:
         return self.arch.flow(nxt)[0] == "return"
 
     def _pop(self, insn, returning=False):
-        """The popped registers from the frame; when returning, only those that carry the result; none
+        """The popped registers from the frame; when returning, only those that carry the result and the
+        registers handed in (the C compiler restores nothing of those: _return writes them back); none
         from the words the frame array leaves out (saves_out: nothing reads what they restore)."""
         d = self.ctx["depth"][insn.address]
-        keep = set(self.results(self.ctx["fn"])) if returning else None
-        values = self.values()
+        keep = set(self.results(self.ctx["fn"])) | set(self.ctx.get("handed", ())) if returning else None
+        values = self.values()          # (a register handed in carries what the caller gets back: _return)
         out = []
         for k, (r, var) in enumerate(self.stack_words(insn)):
             if r is None or r == "pc" or (keep is not None and r not in keep):

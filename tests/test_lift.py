@@ -1102,6 +1102,70 @@ def test_registers_the_caller_left_are_handed_in(tmp_path):
         assert f.readline().startswith("/* dread: fixed r7")
 
 
+FIXED_RESTORE_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global reader, f, top
+    .type reader, %function
+    .thumb_func
+reader: adds    r0, r0, r6      @ reads what its caller left in r6
+        bx      lr
+    .size reader, . - reader
+    .type f, %function
+    .thumb_func
+f:      push    {r6, lr}
+        cbz     r1, 1f
+        movs    r6, #5          @ on this path its own r6; on the other its caller's goes to reader
+1:      bl      reader
+        pop     {r6, pc}        @ its caller's r6 back
+    .size f, . - f
+    .type top, %function
+    .thumb_func
+top:    push    {r4, r6, lr}
+        movs    r6, #7
+        movs    r0, #1
+        movs    r1, #1
+        bl      f
+        adds    r0, r0, r6      @ 7 again behind f
+        pop     {r4, r6, pc}
+    .size top, . - top
+"""
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-gcc")),
+                    reason="needs arm-none-eabi-as and -gcc")
+def test_a_register_handed_in_and_changed_is_restored_at_the_return(tmp_path):
+    """f hands its caller's r6 to reader on one path, so its C gets r6 as the caller left it (handed
+    in, -ffixed-r6), and sets r6 on the other; its epilogue pops the caller's r6 back. The C compiler
+    keeps out of a fixed register and restores nothing of it, and the restore was left out with the
+    other saves (saves_out): the C returned with its own r6 (on a private firmware: two functions that
+    failed "r6 after the return"). The restore is kept for a register handed in, and every return
+    writes it back."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport, regflow
+    (tmp_path / "t.s").write_text(FIXED_RESTORE_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "top", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mthumb", "-mcpu=cortex-m3", "-Os"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    lifter = lift.make_lifter(p, regflow.analyse(p))
+    got = lifter.lift(p.by_name["f"])
+    assert got.handed == ["r6"], got.handed
+    assert '__asm__ volatile ("mov r6, %0" :: "r"(r6)); return' in got.text, got.text
+    lines = []
+    assert lift.check(t, t.image(), ["f"], out=lines.append, jobs=1) == ["f"], "\n".join(lines)
+
 VA_LIST_S = """
     .syntax unified
     .cpu cortex-m3
