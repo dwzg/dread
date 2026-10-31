@@ -77,6 +77,17 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   (a force-push); then go on with what does not depend on it.
 - **When stuck**, after two serious attempts or a few hours on one item: write down what was tried
   and why it failed in the item, put the tree back to the last commit, and take the next item.
+- **Main takes only green commits, and CI runs the whole suite** (the user, 2026-10-31: "push some of
+  the heavy work for dread into dreads CI ... using merge request CI pipelines"). A change is made on a
+  worktree's branch; locally only what is quick or CI cannot do (the fast tests, the gizmo lift checks
+  of a lifter change, bin/ci-container for a test that compiles code); then
+  `~/.config/dread/checked-push.sh --branch NAME` runs the fast tests in the branch's worktree and the
+  leak check, pushes the branch and opens its pull request, whose CI runs every test on Ubuntu's two
+  toolchains; once every check passed, `checked-push.sh --merge NAME` fast-forwards main to it (the
+  same commits), and main's own run follows. Meanwhile the next item goes on. CI has no compiler
+  newer than Ubuntu's: run the whole suite locally now and then in the background (no gate) for the
+  host's. Before 2026-10-31 the whole suite ran locally before every push, 35 to 40 minutes the CPU
+  could not give the targets.
 - **Commit only green**: `.venv/bin/python -m pytest` passes, every gizmo build. Push only through the leak
   check (rule 9) with a script that stops on its exit status; never force-push without the user.
   The push script runs the fast tests first (`pytest -m "not slow"`, about 15 s) and refuses a red
@@ -109,7 +120,7 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   2026-10-21 measurements ran from the checkout, which then had to stay put: a CI fix waited three
   hours behind one). Changes go into worktrees too (`bin/dev-worktree NAME`: a branch, the `.venv`
   linked, the examples' caches copied; without them the suite regenerates gizmo's cases, fifteen
-  minutes more), are tested there in full and come onto `main` when they are done.
+  minutes more), are tested by CI through their pull request and come onto `main` when it is green.
   Before the push, `bin/take-caches WORKTREE` copies the caches the worktree's suite made back
   into the checkout; without it the push's fast tests make them again after a VERSION change.
   A worktree's `.venv` is a link to the checkout's (ignored since 2026-10-22: `/.venv/` matched only
