@@ -576,7 +576,7 @@ class X86:
     TESTS = ("test", "and")                 # the flags of a & b: "test"
     DECIDERS = ("cmp", "test", "sub", "and", "xor", "add")    # (xor: whether a equals b; add: whether a is -b)
 
-    def branch_deciders(self, insns):
+    def branch_deciders(self, insns, returns=False):
         """{conditional jump: (address of what decides it, first, second, imm, kind, sign)} as
         Arm.branch_deciders documents: the flag setter in front of the jump (cmp, test and and: "test";
         cmp, sub and xor: "compare"; add: a compare with the negation), when its operands are
@@ -586,7 +586,8 @@ class X86:
         An operand in memory (cmp dword ptr [ebp - 0x28], 0; cmp byte ptr [ecx], 0x2c; cmp eax, [ebx +
         4]) is ("mem", base, index, scale, displacement, size), engine ids or None: the generator's
         reader reads the memory there (Generator.flag_setters). Until 2026-10-27 a compare with memory
-        gave none, and the compare-guided stage had nothing to solve at most of x86's branches."""
+        gave none, and the compare-guided stage had nothing to solve at most of x86's branches. returns: ignored (this core has no conditional
+        returns)."""
         index = {ins.address: k for k, ins in enumerate(insns)}
         out = {}
         for ins in insns:

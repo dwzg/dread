@@ -1347,7 +1347,7 @@ class Arm:
             return [ops[1].imm & 0xFFFFFFFF]
         return []
 
-    def branch_deciders(self, insns):
+    def branch_deciders(self, insns, returns=False):
         """{conditional branch: (address of what decides it, first, second, imm, kind, sign)}: first
         and second are Unicorn register ids (second None: the constant imm), kind "test" or "compare",
         sign -1 when the decider compares with the negation (adds rN, rN, #4; beq asks whether rN was
@@ -1357,46 +1357,78 @@ class Arm:
         touch the flags are passed: GCC puts a literal's load between cmp and bne, and an eighth of
         the branches of FreeRTOS's builds had their setter so; the values are read at the setter,
         so a register the load writes afterwards does not matter); cbz and cbnz decide themselves
-        (register against 0)."""
+        (register against 0). returns: conditional returns as well (a pop or ldm with pc, a bx, in an
+        IT block: armcc leaves a function so where a test fails), which Generator.answers asks for."""
         index = {ins.address: k for k, ins in enumerate(insns)}
         out = {}
-
-        def reg(capstone_reg, ins):
-            try:
-                return self.reg_id(ins.reg_name(capstone_reg))
-            except ValueError:
-                return None
-
         for ins in insns:
             if ins.id in (csarm.ARM_INS_CBZ, csarm.ARM_INS_CBNZ):
-                r = reg(ins.operands[0].reg, ins)
+                r = self._decider_reg(ins.operands[0].reg, ins)
                 if r is not None:
                     out[ins.address] = (ins.address, r, None, 0, "compare", 1)
                 continue
-            if ins.id != csarm.ARM_INS_B or not self.is_conditional(ins):
+            if not self.is_conditional(ins):
                 continue
-            k = index[ins.address] - 1
-            while k >= 0 and ins.address - insns[k].address <= 16:
-                s = insns[k]
-                if (s.id == csarm.ARM_INS_B and self.is_conditional(s)) or s.id == csarm.ARM_INS_IT:
-                    k -= 1
-                    continue
-                sets = s.id in self.SETTERS or self.sets_flags(s)
-                if not sets and self.flow(s)[0] == "next":
-                    k -= 1                  # (it does not touch the flags: look further back)
-                    continue
-                ops = s.operands[-2:]
-                if sets and len(s.operands) >= 2 and ops[0].type == csarm.ARM_OP_REG \
-                        and ops[1].type in (csarm.ARM_OP_REG, csarm.ARM_OP_IMM) and not any(o.shift.type for o in ops):
-                    kind = "test" if s.id in self.TESTS else "compare"
-                    first = reg(ops[0].reg, s)
-                    second = reg(ops[1].reg, s) if ops[1].type == csarm.ARM_OP_REG else None
-                    imm = ops[1].imm & 0xFFFFFFFF if second is None else 0
-                    sign = -1 if s.id in (csarm.ARM_INS_ADD, csarm.ARM_INS_CMN) else 1
-                    if first is not None and (second is not None or ops[1].type == csarm.ARM_OP_IMM):
-                        out[ins.address] = (s.address, first, second, imm, kind, sign)
-                break
+            if ins.id != csarm.ARM_INS_B and not (returns and self.flow(ins)[0] == "return"):
+                continue
+            found = self._setter_before(insns, index[ins.address] - 1, ins.address)
+            if found is not None:
+                out[ins.address] = found
         return out
+
+    def it_deciders(self, insns, deciders):
+        """{branch: (address, first, second, imm, kind, sign)}, as branch_deciders gives them, of the
+        flag setter in front of the IT block that holds a branch's own decider, for the branches of
+        deciders whose decider is a conditional instruction: where a compare in front of an IT block
+        decides whether the block's own compare runs (armcc tests a callee's result against 0, then in
+        the same block loads a byte and compares it only where the result was 0, and returns
+        conditionally behind), that first compare decides whether the decider runs at all."""
+        index = {ins.address: k for k, ins in enumerate(insns)}
+        out = {}
+        for branch, decider in deciders.items():
+            k = index.get(decider[0])
+            if k is None or decider[0] == branch or not self.is_conditional(insns[k]):
+                continue
+            j = k - 1
+            while j >= 0 and k - j <= 4 and insns[j].id != csarm.ARM_INS_IT:
+                j -= 1
+            if j < 0 or insns[j].id != csarm.ARM_INS_IT:
+                continue
+            found = self._setter_before(insns, j - 1, insns[j].address)
+            if found is not None:
+                out[branch] = found
+        return out
+
+    def _decider_reg(self, capstone_reg, ins):
+        try:
+            return self.reg_id(ins.reg_name(capstone_reg))
+        except ValueError:
+            return None
+
+    def _setter_before(self, insns, k, origin):
+        """The flag setter at insns[k] or before it, at most 16 bytes before origin, as branch_deciders
+        describes it, or None."""
+        while k >= 0 and origin - insns[k].address <= 16:
+            s = insns[k]
+            if (s.id == csarm.ARM_INS_B and self.is_conditional(s)) or s.id == csarm.ARM_INS_IT:
+                k -= 1
+                continue
+            sets = s.id in self.SETTERS or self.sets_flags(s)
+            if not sets and self.flow(s)[0] == "next":
+                k -= 1                      # (it does not touch the flags: look further back)
+                continue
+            ops = s.operands[-2:]
+            if sets and len(s.operands) >= 2 and ops[0].type == csarm.ARM_OP_REG \
+                    and ops[1].type in (csarm.ARM_OP_REG, csarm.ARM_OP_IMM) and not any(o.shift.type for o in ops):
+                kind = "test" if s.id in self.TESTS else "compare"
+                first = self._decider_reg(ops[0].reg, s)
+                second = self._decider_reg(ops[1].reg, s) if ops[1].type == csarm.ARM_OP_REG else None
+                imm = ops[1].imm & 0xFFFFFFFF if second is None else 0
+                sign = -1 if s.id in (csarm.ARM_INS_ADD, csarm.ARM_INS_CMN) else 1
+                if first is not None and (second is not None or ops[1].type == csarm.ARM_OP_IMM):
+                    return (s.address, first, second, imm, kind, sign)
+            return None
+        return None
 
     # ---- Unicorn ----
 

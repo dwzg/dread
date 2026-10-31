@@ -1398,6 +1398,120 @@ def test_answers_give_a_stubbed_callee_the_answer_the_branch_needs(tmp_path):
     assert new[0]["returns"][0] == 0x31337, new
 
 
+CHAIN_S = r"""
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global chain_gate
+    .type chain_gate, %function
+    .thumb_func
+chain_gate:                     @ (buffer, key): 1 unless make_odd(key) is 0 and the buffer's first byte 0x5a
+    push {r4, r5, lr}
+    mov r5, r0
+    mov r0, r1
+    bl make_odd
+    cmp r0, #0
+    ittee eq
+    ldrbeq r0, [r5]
+    cmpeq r0, #0x5a
+    movne r0, #1
+    popne {r4, r5, pc}
+    ldr r1, =chain_out
+    movs r0, #0x5a
+    str r0, [r1]
+    movs r0, #2
+    pop {r4, r5, pc}
+    .size chain_gate, . - chain_gate
+
+    .global return_gate
+    .type return_gate, %function
+    .thumb_func
+return_gate:                    @ (key): 1 unless key passes the gate and make_odd(key) is even
+    push {r4, lr}
+    ldr r1, =0x9E3779B1          @ the gate (GATE_TOP): the generator's search does not get past it
+    mul r1, r0, r1
+    lsrs r1, r1, #7
+    ldr r2, =GATE_TOP
+    cmp r1, r2
+    itt ne
+    movne r0, #1
+    popne {r4, pc}
+    bl make_odd
+    tst r0, #1
+    itt ne
+    movne r0, #1
+    popne {r4, pc}
+    ldr r1, =chain_out
+    str r0, [r1]
+    movs r0, #3
+    pop {r4, pc}
+    .size return_gate, . - return_gate
+    .ltorg
+"""
+
+CHAIN_BUFFER = 0x20000100
+
+
+def chain_target(tmp_path):
+    """A program in armcc's shapes, written in assembly: return_gate leaves by a conditional return
+    unless make_odd's result is even, chain_gate unless that result is 0 and then the buffer's first byte
+    is 0x5a (one IT block: the byte is compared only where the result was 0). make_odd (C) answers odd
+    whatever its argument. Its target and the written cases."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text("unsigned chain_out;\n"
+                                  "__attribute__((noinline)) unsigned make_odd(unsigned k) { return k | 1u; }\n")
+    (tmp_path / "t.s").write_text(CHAIN_S.replace("GATE_TOP", "0x%x" % GATE_TOP))
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH\n .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "chain_gate", "-o", elf, str(tmp_path / "t.c"),
+                    str(tmp_path / "t.s")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mcpu=cortex-m3", "-mthumb", "-Os", "-ffunction-sections"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    written = {"chain_gate": {"args": [CHAIN_BUFFER, 4, 0, 0], "mem": [], "returns": [], "calls": [], "frame": 0},
+               "return_gate": {"args": [GATE_KEY, 0, 0, 0], "mem": [], "returns": [], "calls": [], "frame": 0}}
+    return t, written
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_answers_take_a_conditional_return_as_a_branch(tmp_path):
+    """return_gate leaves by popne where make_odd's result is odd, always (behind a gate that only the
+    written case's key passes, so that the search's stubs do not get there). The answers take the
+    conditional return as a branch whose other way is the code behind it, stub make_odd at that call
+    with an even value, and the code behind runs."""
+    t, written = chain_target(tmp_path)
+    gen = Generator(t, t.image())
+    before, after, new, words = answered(gen, "return_gate", written["return_gate"])
+    assert before < words and after == words, sorted(hex(a) for a in words - after)
+    make_odd = gen.program.by_name["make_odd"].entry
+    assert any(c[0] == make_odd for c in new[0]["calls"]) and new[0]["returns"][0] % 2 == 0, new
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_answers_follow_a_chain_of_compares_in_an_it_block(tmp_path):
+    """chain_gate's popne is decided by cmpeq, which runs only where make_odd's result was 0: in every
+    run before the answers it is skipped. The answers answer the compare in front of the IT block first
+    (make_odd 0 at that call: a scaffold, which gains no code and is not an answer of its own), then
+    the byte cmpeq compares, and the code behind the return runs."""
+    t, written = chain_target(tmp_path)
+    gen = Generator(t, t.image())
+    before, after, new, words = answered(gen, "chain_gate", written["chain_gate"])
+    assert before < words and after == words, sorted(hex(a) for a in words - after)
+    assert len(new) == 1, new
+    assert [new[0]["args"][0], 1, 0x5a] in new[0]["mem"] and 0 in new[0]["returns"], new
+
+
 @pytest.mark.slow
 @pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 def test_a_lift_check_accepts_what_the_answers_cover(tmp_path, monkeypatch):

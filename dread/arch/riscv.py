@@ -659,9 +659,10 @@ class RiscV:
             return [f.imm & 0xFFFFFFFF]
         return []
 
-    def branch_deciders(self, insns):
+    def branch_deciders(self, insns, returns=False):
         """{conditional branch: (itself, first, second, 0, "compare", 1)}: a RISC-V branch compares
-        its two registers itself; zero stands for the constant 0 (None)."""
+        its two registers itself; zero stands for the constant 0 (None). returns: ignored (this core has no conditional
+        returns)."""
         out = {}
         for ins in insns:
             f = fields(ins)

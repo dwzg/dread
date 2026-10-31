@@ -5676,3 +5676,28 @@ the value used elsewhere.
 - **Undo**: leave the fourth column out (the line applies as written); argued_kept then builds no
   analysis.
 
+
+## The answers take conditional returns and IT-block chains (2026-10-31)
+
+**Decided by recommendation.** On a private firmware built with armcc, `dread uncovered` showed
+code that no case ran behind conditional returns (a pop or bx in an IT block), which the frontier
+answers did not look at (only conditional `b`, `cbz` and `cbnz`), and behind branches decided by a
+chain of compares in one IT block: a callee's result compared with 0, then, only where it was 0, a
+byte loaded and compared. The branch's flag setter is the second compare, which did not run in any
+case, so the answers found no visit to answer; and an answer of the first compare alone gains no code
+(block coverage counts a skipped conditional instruction as run), so it was not kept to answer the
+second from. On that firmware such branches held a fifth of what the cases missed.
+
+- **Conditional returns**: (a) leave them; (b) take them as branches whose other way is the code
+  behind them (`conditional_branches(returns=True)`, `arch.branch_deciders(returns=True)`), for the
+  answers only. **(b)**: the search's other stages keep their view, so the generated cases stay as they
+  were (VERSION stays; ANSWERS 7 -> 8 makes the answers anew).
+- **Chains**: (a) answer every source of the branch at once (combinations: many runs); (b) where the
+  decider did not run in a base, answer the compare in front of its IT block (`arch.it_deciders`) and
+  keep a run in which the decider then runs as a scaffold, the base the branch is answered from first;
+  the scaffold is no answer of its own (it gains no code) and is not returned. **(b)**: one scaffold
+  per branch, then the existing answers in turn.
+- **Not done**: chains across IT blocks, or of conditional branches (those already gain code step by
+  step); a scaffold for a decider that runs in some base but takes the wrong value from the compare in
+  front.
+- **Undo**: `returns=False` in `_answer`'s calls and no `chains` (the scaffolds then never form).

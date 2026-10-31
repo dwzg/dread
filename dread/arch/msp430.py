@@ -622,11 +622,12 @@ class Msp430:
             return [-src.value & (0xFF if f.byte else 0xFFFF)]
         return []
 
-    def branch_deciders(self, insns):
+    def branch_deciders(self, insns, returns=False):
         """{conditional jump: (the instruction that sets its flags, first, second, imm, kind, 1)}:
         a cmp or bit right in front of it. cmp src, dst compares dst with src ("compare": first dst,
         second src), bit src, dst tests their common bits ("test"); a constant source is imm with
-        second None. Only register operands: a memory operand is in no register to read."""
+        second None. Only register operands: a memory operand is in no register to read. returns: ignored (this core has no conditional
+        returns)."""
         out, prev = {}, None
         for ins in insns:
             f = ins.fields

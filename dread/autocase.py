@@ -250,11 +250,12 @@ ANSWER_VISITS = 2           # visits of a branch whose decision is answered (the
 ANSWER_BASES = 2            # cases a branch is answered from at most (that give something to answer: Generator.answers)
 ANSWER_SCAN = 8             # ... among the first this many cases that get there
 ANSWER_EVENTS = 512         # calls and visits a run records at most
-ANSWERS = 7                 # the frontier answers' version (Generator.answers): cached cases get them anew when
+ANSWERS = 8                 # the frontier answers' version (Generator.answers): cached cases get them anew when
                             # it changes, or when the cases they are made from change (_answered); 2: the code
                             # behind a stop (behind, stop_from); 3: a word read again (reread, later); 4: behind a
                             # call whose run ended at a stop deeper in; 5: a case that ends at a fault there;
-                            # 6: a system register an mrs reads (sysregs); 7: the faulting page mapped (map)
+                            # 6: a system register an mrs reads (sysregs); 7: the faulting page mapped (map);
+                            # 8: conditional returns, and a decider an IT block's condition skips (scaffolds)
 MAPPED_WORD = 3             # what a case's mapped page holds at the address its run faulted at (behind): not 0,
                             # so that a C reading another address of the page (0 there) differs; small, so
                             # that a count or an index read there ends soon
@@ -585,13 +586,16 @@ class Generator:
             out.append(b)
         return None
 
-    def flag_setters(self, words):
+    def flag_setters(self, words, returns=False, chains=False):
         """{conditional branch: (address of the instruction that decides it, reader)}. The reader
         takes the emulator stopped at that instruction and returns (first operand, second operand,
         "test" or "compare"). Which instruction decides a branch, and with which operands, is the
         architecture's (arch.branch_deciders: ARM's flag setters, RISC-V's branch itself). An operand
         in memory (x86: ("mem", base, index, scale, displacement, size)) is read there; the reader
-        gives None where that memory cannot be read."""
+        gives None where that memory cannot be read. returns: conditional returns as well. chains:
+        instead, for the branches whose decider is a conditional instruction in an IT block, the setter
+        in front of that block, whose condition decides whether the decider runs (arch.it_deciders;
+        none on a core without IT blocks)."""
         out = {}
 
         def operand(uc, op, imm):
@@ -603,7 +607,11 @@ class Generator:
             address = ((uc.reg_read(base) if base is not None else 0) +
                        (uc.reg_read(index) * scale if index is not None else 0) + disp) & 0xFFFFFFFF
             return int.from_bytes(uc.mem_read(address, size), "little")
-        for branch, (at, first, second, imm, kind, sign) in self.arch.branch_deciders(self.insns(words)).items():
+        deciders = self.arch.branch_deciders(self.insns(words), returns=returns)
+        if chains:
+            outer = getattr(self.arch, "it_deciders", None)
+            deciders = outer(self.insns(words), deciders) if outer is not None else {}
+        for branch, (at, first, second, imm, kind, sign) in deciders.items():
             def reader(uc, first=first, second=second, imm=imm, kind=kind, sign=sign):
                 try:
                     a, b = operand(uc, first, imm), operand(uc, second, imm)
@@ -613,13 +621,17 @@ class Generator:
             out[branch] = (at, reader)
         return out
 
-    def conditional_branches(self, words):
-        """{address: (target, fall-through)} of the function's conditional direct branches."""
+    def conditional_branches(self, words, returns=False):
+        """{address: (target, fall-through)} of the function's conditional direct branches; with
+        returns also its conditional returns, their target None (the code behind them is the way a
+        case can miss)."""
         out = {}
         for ins in self.insns(words):
             kind, target, falls = self.arch.flow(ins)
             if kind == "jump" and falls and target is not None:
                 out[ins.address] = (target, ins.address + ins.size)
+            elif returns and kind == "return" and falls:
+                out[ins.address] = (None, ins.address + ins.size)
         return out
 
     # ---- applying a case ----
@@ -2720,7 +2732,10 @@ class Generator:
         done: a callee that returns its argument untouched (dread.regflow: the branch's source is then the
         argument, not the stub's answer), a real callee's store into a local, a switch's index, a value two
         conditions decide together (a global the function overwrites unless another one equals an
-        argument)."""
+        argument). What is: conditional returns are branches like the others (the code behind them), and
+        a decider that an IT block's condition skips is reached through the compare in front of the block
+        (answer: a scaffold), so that armcc's chains of a callee's result and a byte it would have read
+        get both answers in turn."""
         before, self.current = self.current, name
         loop_before, self.loop = self.loop, loop
         calls_before, self.loop_calls = self.loop_calls, self.loop_calls_for(words) if loop else LOOP_CALLS
@@ -2731,7 +2746,9 @@ class Generator:
 
     def _answer(self, name, entry, words, cases, limit):
         words_set = set(words)
-        setters = self.flag_setters(words)
+        setters = self.flag_setters(words, returns=True)
+        chains = self.flag_setters(words, returns=True, chains=True)
+        scaffolds = {}                      # branch -> the corpus case that gets its decider to run (one each)
         image = self.image
         start, end = cover_span(self.program, words)
         runs = [ANSWER_RUNS]
@@ -2744,19 +2761,21 @@ class Generator:
             if why is None:
                 reach[i] = set(got)
         covered = set().union(*reach.values()) if reach else set()
-        branches = self.conditional_branches(words)
+        branches = self.conditional_branches(words, returns=True)
 
         def edge():
             return {w for w, (target, fall) in branches.items() if w in covered and (
                 (target is not None and target in words_set and target not in covered) or
                 (fall in words_set and fall not in covered))}
 
-        def run(case, watch=None, loads=()):
+        def run(case, watch=None, loads=(), reach_at=None):
             """(machine, events, error) of one run; events: the stub marks ("call", callee, its call
             number, stub calls before it, answered), with watch (branch, decider, reader) the visits of
             the branch's decider ("decide", operands or None, stub calls so far), and the reads of the
             loads at the addresses in loads ("load", its address, address read, size, value, the number of
-            that read among the reads that started at that address), in order."""
+            that read among the reads that started at that address), in order; with reach_at, each time
+            the instruction there runs ("reach", its address): a conditional one that its IT block's
+            condition skips does not run (Unicorn calls no hook for it)."""
             runs[0] -= 1
             m = self.machine()
             m.plan = []
@@ -2774,6 +2793,11 @@ class Generator:
                         events.append(("decide", read(uc) if read is not None else None, m.stub_calls[0]))
                 m.hook_add(UC_HOOK_CODE, visit, begin=at if at is not None else branch,
                            end=at if at is not None else branch)
+            if reach_at is not None:
+                def reached(uc, address, size, user):
+                    if len(events) < ANSWER_EVENTS:
+                        events.append(("reach", address))
+                m.hook_add(UC_HOOK_CODE, reached, begin=reach_at, end=reach_at)
             if loads:
                 armed, pc = [None], self.layout.pc
 
@@ -3196,11 +3220,26 @@ class Generator:
                     ordered.append(v)
             return ordered
 
+        def scaffold(w, case, m):
+            """Keep case, whose run got w's decider to run where its base's did not, as the case w is
+            answered from first (scaffolds): not an answer of its own, it gains no code (block coverage
+            counts a skipped conditional instruction as run)."""
+            case = {k: v for k, v in case.items() if k not in READING_MARKS}
+            corpus.append(case)
+            reach[len(corpus) - 1] = set(m.covered_insns(words))
+            scaffolds[w] = len(corpus) - 1
+
         def answer(w, base, kind, key):
-            """Answers for the branch w from corpus case base through one source: whether one gained, None
-            where base gives nothing to answer (its run does not get there, or reads the deciding word in the
-            image: a pointer given as a small number on a memory map whose flash starts at 0)."""
+            """Answers for the branch w from corpus case base through one source: whether one gained (or
+            kept a scaffold), None where base gives nothing to answer (its run does not get there, or reads
+            the deciding word in the image: a pointer given as a small number on a memory map whose flash
+            starts at 0). Where w's decider is a conditional instruction that did not run in base (an IT
+            block's condition skipped it: a callee's result compared with 0 in front of the block, a byte
+            loaded and compared in it only where that result was 0), the compare in front of the IT block
+            is answered instead (chains), and a run that gets the decider to run becomes w's scaffold:
+            answered from that, the decider's own sources follow."""
             at, read = setters.get(w, (None, None))
+            inner = None
             case = json.loads(json.dumps(base))
             loads = (key,) if kind in ("load", "reread") else (key[0],) if kind == "fill" else ()
             if kind == "fill":              # (a stubbed callee: with the function's frame its stub fills the local,
@@ -3218,6 +3257,12 @@ class Generator:
             if error is not None and not case.get("stops") and not case.get("hang"):
                 return None
             visits = [k for k, e in enumerate(events) if e[0] == "decide"][:ANSWER_VISITS]
+            if not visits and w in chains and w not in scaffolds and at is not None:
+                inner, (at, read) = at, chains[w]
+                m, events, error = run(case, (w, at, read), loads)
+                if error is not None and not case.get("stops") and not case.get("hang"):
+                    return None
+                visits = [k for k, e in enumerate(events) if e[0] == "decide"][:ANSWER_VISITS]
             usable = False
             for k in visits:
                 make, old, keep = maker(case, kind, key, events, k, m, decider=at)
@@ -3233,7 +3278,7 @@ class Generator:
                     v = order[0]
                     trial = make(v)
                     tried += 1
-                    m2, events2, error2 = run(trial, (w, at, read))
+                    m2, events2, error2 = run(trial, (w, at, read), reach_at=inner)
                     seen = [e[1] for e in events2 if e[0] == "decide"]
                     probes.append((v, seen[nth - 1] if len(seen) >= nth else None))
                     if DEBUG:
@@ -3241,6 +3286,10 @@ class Generator:
                             kind, key, nth, v, probes[-1][1], error2 or "returns",
                             len(m2.covered_insns(words) - covered)))
                     if gained(trial, m2, error2, keep=keep, spare=[0] if flips >= ANSWER_FLIPS else None):
+                        return True
+                    if inner is not None and error2 is None and w not in scaffolds and not self.ends_badly(m2) \
+                            and any(e[0] == "reach" for e in events2):
+                        scaffold(w, trial, m2)
                         return True
                     back = getattr(make, "back", None)
                     if back is not None and m2.timed_out and old is not None and runs[0] > 0:
@@ -3297,6 +3346,8 @@ class Generator:
                     continue
                 sources = self.decision_sources(name, w)
                 bases = [i for i in sorted(reach) if w in reach[i]][:ANSWER_SCAN]
+                if w in scaffolds:
+                    bases = [scaffolds[w]] + [i for i in bases if i != scaffolds[w]]
                 if DEBUG:
                     print("answer 0x%x: sources %s, bases %s" % (w, sources, bases))
                 if not sources:
@@ -3318,7 +3369,8 @@ class Generator:
                     if done:
                         break
                     used += usable
-        return corpus[len(cases):]
+        held = set(scaffolds.values())
+        return [c for i, c in enumerate(corpus) if i >= len(cases) and i not in held]
 
 
 class Cells(dict):
