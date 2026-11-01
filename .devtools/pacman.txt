@@ -1,0 +1,7 @@
+# Arch packages DREAD's tests use (claude-container's devtools); CI installs the Ubuntu
+# counterparts (.github/workflows), conftest finds either name of the RISC-V compiler.
+arm-none-eabi-gcc arm-none-eabi-binutils arm-none-eabi-newlib
+riscv64-elf-gcc riscv64-elf-binutils riscv64-elf-newlib
+clang lld llvm
+lib32-glibc lib32-gcc-libs      # gcc -m32 for the x86 tests (the image enables multilib)
+# ghidra                        # optional: the Ghidra tests skip without it
