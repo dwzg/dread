@@ -6954,12 +6954,32 @@ toolchain and the engine's check").
   that a caller reads: the RISC-V lifter hands it back through the naked entry (dread.lift_riscv
   render, MORE; dread.lift more_results). The ARC lifter refuses it (ArcLifter.MORE = ()). Port that
   — but a real lever only where those callers are themselves lifting; measure before starting.
+- [x] **ARC: flags a function preserves, read by its callers.** Done 2026-11-07: a function that
+  leaves the hardware flags unchanged (dread.regflow's preserved) yet whose callers read them after
+  the call was refused ("its callers read the flags it leaves"), though the flags they read are
+  their own, from before the call. The lifted body's C clobbers the hardware flags, so render gives
+  such a function a naked entry that saves STATUS32's flag bits, calls the body, and restores them
+  before returning, honouring the contract even for callers that are not themselves lifted
+  (ArcLifter._preserves_read_flags, _flag_temps; tests/test_lift_arc.py). The wrapper's temporaries
+  are r8-r12 the callers do not read and are not argument registers, so nothing observable is
+  clobbered. Skipping the refusal without the wrapper is unsound — the per-function check does not
+  test a caller's flag reliance (docs/decisions.md). On a private firmware this confirmed functions
+  the flags limit had blocked. Not done: a function that *sets* the flags its callers read
+  (the dominant flags refusal); its final flags are computed deep in the body, where the epilogue
+  would clobber them before a wrapper could read them — no clean exit to restore from.
 - [ ] **ARC: shared restore/epilogue fragments listed as functions.** The function table lists the
-  shared restore and epilogue tails that other functions tail-jump into as standalone functions;
-  they read the registers their caller left and cannot lift on their own (now refused as fragments,
-  _unwinds_below_entry). Recognising them the way the frame-helper machinery recognises save/restore
-  millicode would stop them counting as refused functions. This is the real blocker behind most of
-  what looked like ARC stack arguments.
+  shared restore and epilogue tails that other functions tail-jump into as standalone functions, and
+  interrupt dispatch machinery (context-save routines reached by per-vector thunks) likewise. They
+  read the registers their caller left and cannot lift on their own (now refused as fragments,
+  _unwinds_below_entry, or for reading a register before writing it). Investigated 2026-11-07: these
+  are genuinely not C functions, so recognising them better is accounting (it would lower the refused
+  count), not coverage — a checked hypothesis that r13 was a pinned global base, which would have
+  unlocked a chunk of them, was false (r13 is written throughout). Low priority.
+- [ ] **ARC: a wrapper's temporary must not be a handed register.** The stack-argument wrapper uses
+  r12 unconditionally (render); a function with r12 in its handed set (kept and preserved) would read
+  the wrong r12 in its body. Not triggered on the known target (no genuine stack-argument function),
+  and the lift check would drop such a case rather than accept it, so it is a completeness gap, not a
+  soundness hole. Fix: pick the temporary as the flag wrapper does (_flag_temps).
 - [x] **dread discover: vector tables of fewer slots.** Done for ARC (2026-11-07: the table ends at
   the first slot that is no j limm; a private ARC600 image has fewer than 32 and code behind them).
 

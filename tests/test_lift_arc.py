@@ -578,3 +578,83 @@ def test_arc_restore_fragment_is_not_wrapped(tmp_path):
     assert lifter._unwinds_below_entry(fn)
     with pytest.raises(lift.Refused, match="unwinding below it"):
         lifter.lift(fn)
+
+
+# --- flags a function preserves, read by its callers: the flag-preserving wrapper ---
+
+PRESERVE_FLAGS_S = """
+    .text
+    .global caller, pres, use
+    .align 4
+; pres preserves STATUS32's flags: it branches with br (a fused compare-branch, no flag
+; side-effect), never cmp or a .f, so the original leaves the caller's flags untouched. The
+; lifted C compiles its if to a flag-setting compare, so the body clobbers the hardware flags;
+; render's naked wrapper saves and restores them (_preserves_read_flags).
+    .type pres, @function
+pres:
+    breq r0,0,.L0
+    add_s r0,r1,1
+    j_s [blink]
+.L0:
+    add_s r0,r1,2
+    j_s [blink]
+    .align 4
+; caller sets the flags with cmp, calls pres, and reads them (mov.eq): it returns 100 when
+; r2 == r3, else 7. It relies on pres leaving the flags as it found them.
+    .type caller, @function
+caller:
+    push_s blink
+    cmp r2,r3
+    bl pres
+    mov_s r0,7
+    mov.eq r0,100
+    pop_s blink
+    j_s [blink]
+    .align 4
+    .type use, @function
+use:
+    asl_s r1,r0,1
+    add_s r0,r0,r1
+    j_s [blink]
+"""
+
+
+@needs_arc_gcc
+def test_arc_preserved_flags_read_by_callers_are_wrapped(tmp_path):
+    """A function that preserves the hardware flags (dread.regflow's preserved) yet whose callers
+    read them after the call: the flags they read are their own, from before the call. The lifted
+    body's C clobbers the hardware flags, so render gives the function a naked entry that saves
+    STATUS32's flag bits, calls the body, and restores them before returning
+    (ArcLifter._preserves_read_flags). The lift check accepts pres, and — the point of the wrapper —
+    an original (not lifted) caller that reads the flags agrees with the original image when pres is
+    replaced by its C."""
+    from dread import elfimport
+    from dread.emu import Layout, Machine
+    from dread.overlay import load_placement
+    (tmp_path / "t.s").write_text(PRESERVE_FLAGS_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arc-elf32-as", "-mcpu=arc600", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arc-elf32-ld", "-Ttext=0x0", "-e", "use", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(ARC_TARGET.replace('name = "arc-snippets"', 'name = "arc-presflags"'))
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    flow = regflow.analyse(p)
+    assert "flags" in flow.kept_regs("pres") and "flags" in set(flow.preserved_regs("pres"))
+    lifter = lift.make_lifter(p, flow)
+    assert lifter._preserves_read_flags(p.by_name["pres"])
+    text = lifter.lift(p.by_name["pres"]).text
+    assert "__attribute__((naked)) void pres(void)" in text
+    assert "lr r" in text and "[status32]" in text and "flag r" in text   # save and restore the flags
+    lines = []
+    assert "pres" in lift.check(t, t.image(), ["pres", "use"], out=lines.append, jobs=1), "\n".join(lines)
+    # the point: pres is now C, caller stays the original; an original caller reads the flags pres
+    # preserves, and the rebuilt image agrees with the original (unsound without the wrapper).
+    work = tmp_path / "build" / "lift-check" / "main"
+    aliases, _ = load_placement(str(work / "placement.json"))
+    rebuilt = (work / "payload.bin").read_bytes()
+    for r2, r3 in [(5, 5), (5, 9), (0, 0), (9, 5), (0xffffffff, 0xffffffff)]:
+        orig = Machine(Layout(t, t.image()), t.image().payload(), None).call(p.by_name["caller"].entry, 0, 0, r2, r3).ret
+        reb = Machine(Layout(t, t.image()), rebuilt, aliases).call(p.by_name["caller"].entry, 0, 0, r2, r3).ret
+        assert orig == reb == (100 if r2 == r3 else 7), (r2, r3, orig, reb)

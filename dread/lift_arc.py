@@ -870,17 +870,43 @@ class ArcLifter(lift.Lifter):
         flow = self.flow
         return bool(flow and "r1" in flow.kept_regs(name) and "r1" not in flow.preserved_regs(name))
 
+    def _preserves_read_flags(self, fn):
+        """Whether fn preserves the hardware flags (dread.regflow's preserved) yet its callers read
+        them after the call (its kept): the flags they read are their own, from before the call,
+        which the original leaves untouched. The body's C clobbers the hardware flags, so render
+        gives such a function a naked entry that saves STATUS32's flag bits, calls the body, and
+        restores them before returning, honouring the contract for callers that are not themselves
+        lifted. Not for a function that also takes stack arguments (its wrapper does not restore the
+        flags) or that a C cannot wrap (an interrupt handler, or a compiler without naked functions)."""
+        flow = self.flow
+        if flow is None:
+            return False
+        if "flags" not in flow.kept_regs(fn.name) or "flags" not in set(flow.preserved_regs(fn.name)):
+            return False
+        if self.stack_args(fn):
+            return False
+        return self.can_wrap(fn) and self._flag_temps(fn) is not None
+
+    def _flag_temps(self, fn):
+        """Two scratch registers the flag-preserving wrapper may use (render): r8-r12 that the
+        callers do not read (not in kept, so clobbering them is unseen) and that are not argument
+        registers (the body needs r0-r7 as the caller left them). None when fewer than two are free."""
+        kept = set(self.flow.kept_regs(fn.name)) if self.flow is not None else set()
+        free = [r for r in ("r12", "r11", "r10", "r9", "r8") if r not in kept]
+        return free[:2] if len(free) >= 2 else None
+
     def _check_kept(self, fn):
-        """Refuse when callers read what C cannot hand back: the flags, or a register beyond r0 and r1
-        that the function sets."""
+        """Refuse when callers read what C cannot hand back: the flags a function sets (a function
+        that only preserves the flags its callers read is wrapped, _preserves_read_flags), or a
+        register beyond r0 and r1 that the function sets."""
         flow = self.flow
         if flow is None:
             return
         result = {"r0", "r1"} if self._wide(fn.name) else {"r0"}
         kept = set(flow.kept_regs(fn.name)) - result
-        if "flags" in kept:
+        if "flags" in kept and not self._preserves_read_flags(fn):
             raise Refused("its callers read the flags it leaves (%s)" % flow.why(fn.name, "flags"))
-        written = sorted(kept - set(flow.preserved_regs(fn.name)))
+        written = sorted(kept - set(flow.preserved_regs(fn.name)) - {"flags"})
         if written:
             raise Refused("its callers read %s, which it sets (%s); C returns r0 and r1 only" % (
                 written[0], flow.why(fn.name, written[0])))
@@ -1431,6 +1457,28 @@ class ArcLifter(lift.Lifter):
                          'add sp, sp, %d\\n\\tj [blink]");' % (frame, body_name, frame))
             lines.append("}")
             lines.append("__attribute__((noinline, used)) %s %s(%s, u32 sp0)" % (result, body_name, params))
+            lines.append("{")
+            init = body_init
+        elif self._preserves_read_flags(fn):
+            # the function preserves the hardware flags (its callers read their own, from before the
+            # call), but the body's C clobbers them: a naked entry saves STATUS32's flag bits on the
+            # stack, calls the body, and restores them (keeping the body's E1/E2/H) before returning
+            # through blink, so a caller that is not itself lifted finds the flags the original would
+            # have left. Its two temporaries (t1, t2) are r8-r12 the callers do not read and are not
+            # argument registers, so the body still gets r0-r7 and its handed registers as the caller
+            # left them, and nothing the callers read is clobbered (_flag_temps).
+            body_name = fn.name + "_dread_body"
+            t1, t2 = self._flag_temps(fn)
+            lines.append("%s %s(%s);" % (result, body_name, params))
+            lines.append("__attribute__((naked)) void %s(void)" % fn.name)
+            lines.append("{")
+            lines.append('    __asm__ volatile ("lr %s,[status32]\\n\\tst.a blink, [sp, -4]\\n\\t'
+                         'st.a %s, [sp, -4]\\n\\tbl %s\\n\\tld.ab %s, [sp, 4]\\n\\tld.ab blink, [sp, 4]\\n\\t'
+                         'lr %s,[status32]\\n\\tand %s,%s,0x7\\n\\tand %s,%s,0xf00\\n\\tor %s,%s,%s\\n\\t'
+                         'flag %s\\n\\tj [blink]");'
+                         % (t1, t1, body_name, t1, t2, t2, t2, t1, t1, t2, t2, t1, t2))
+            lines.append("}")
+            lines.append("__attribute__((noinline, used)) %s %s(%s)" % (result, body_name, params))
             lines.append("{")
             init = body_init
         else:

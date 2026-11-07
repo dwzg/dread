@@ -9,6 +9,42 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## ARC: lift a flag-preserving function whose callers read its flags, by wrapping it (2026-11-07)
+
+**Decided by the user**, who chose this lever over cleaning up the restore-fragment accounting
+(docs/todo.md "ARC: flags a function preserves").
+
+- **Question.** The dominant ARC refusal is "its callers read the flags it leaves". A large share of
+  those functions preserve the flags (the original leaves them unchanged) rather than set them: the
+  flags a caller reads after the call are its own, from before the call. The lifter refused them
+  outright. Can they be lifted?
+- **The unsound shortcut, rejected.** Simply skipping the refusal when the flags are preserved lifts
+  them, and the per-function lift check accepts them — but it is unsound. The lifted body's compiled
+  C clobbers the hardware flags, and a caller that is not itself lifted (on the EC, every flag-read
+  site was such a caller) would read the clobbered flags. The per-function check never exercises a
+  caller's reliance on the callee's flags, so it does not catch this; it is exactly what the refusal
+  (rule 6) guards against. Confirmed by measuring: all flag-read sites came from non-lifted callers.
+- **The sound choice.** Give such a function a naked entry that saves STATUS32's flag bits, calls
+  the body, and restores them (keeping the body's E1/E2/H) before returning through blink. The
+  compiled C then preserves the hardware flags as the original did, so every caller — lifted or not
+  — is honoured. The ARC epilogue sets no condition flags, but to be robust the restore is the last
+  flag-affecting instruction before the return, under the naked entry's control. The wrapper's two
+  temporaries are r8-r12 that the callers do not read and that are not argument registers, so the
+  body still receives r0-r7 and its handed registers as the caller left them and nothing observable
+  is clobbered (a first version used r11/r12 and broke functions that hand back r11). This adds
+  capability; it does not weaken the comparison.
+- **Why.** It turns the largest addressable slice of the flags limit into confirmed functions on a
+  private firmware, soundly, matching the architecture's existing preserved-register handling. The
+  restore-fragment alternative was investigated and found to be accounting only.
+- **Undo.** ArcLifter._preserves_read_flags returns False; render drops the flag-preserving branch;
+  _check_kept refuses "flags" in kept again.
+- **Status.** In the code (dread.lift_arc, tests/test_lift_arc.py).
+
+**Not done, and why.** A function that *sets* the flags its callers read (the rest of the flags
+limit) cannot be wrapped the same way: its final flags are computed deep in the body, and the
+compiler's epilogue would clobber them before any wrapper could read them to hand on. It stays
+refused.
+
 ## ARC: keep the stack-argument wrapper although it confirmed nothing on the EC (2026-11-07)
 
 **Decided by the user**, who chose "keep + guard" when the measurement came back (docs/todo.md
