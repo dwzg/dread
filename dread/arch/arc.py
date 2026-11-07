@@ -114,6 +114,7 @@ class Arc:
         if isa not in ("arc600", "arc700"):
             raise ValueError("isa is arc600 or arc700, not %r" % (isa,))
         self.isa, self.endian, self.cpu = isa, endian, cpu
+        self._frame_helpers = {}        # entry -> ("save", pushed) | ("restore", None) | None (frame_helper)
         self.ghidra = ghidra    # None: Ghidra (11.x, as installed here) has no ARCompact processor;
                                 # [arch] ghidra names a language where one is added (dread discover
                                 # finds the functions meanwhile)
@@ -408,6 +409,90 @@ class Arc:
         if f.op != "lp":
             return None
         return insn.address + insn.size, f.target
+
+    def frame_helper(self, program, entry, limit=64):
+        """("save", the bytes it pushes) or ("restore", None) when the routine at `entry` is a leaf
+        that only saves (stores) or only restores (loads) registers through the stack and returns
+        through blink: a compiler's register save/restore "millicode" (GCC's -mmillicode
+        __st_r13_to_rNN, which stores into a frame the caller reserved, and __ld_r13_to_rNN_ret,
+        which restores, unwinds the frame and returns), or a hand-written equivalent that pushes and
+        pops. Else None. The facts come from the routine's own code, not its name (rule 2). dread
+        lift treats a call of a save helper as the function's omitted register saves and a tail-jump
+        to a restore helper as its epilogue; dread.regflow treats such a tail-jump as a return."""
+        cache = self._frame_helpers
+        if entry not in cache:
+            cache[entry] = None                 # (a self-reference, were there one, stays None)
+            cache[entry] = self._analyse_frame_helper(program, entry, limit)
+        return cache[entry]
+
+    def _analyse_frame_helper(self, program, entry, limit):
+        a, sp, stores, loads, seen = entry, 0, 0, 0, set()
+
+        def apply(insn):
+            nonlocal sp, stores, loads
+            f = insn.fields
+            op = f.op
+            if op == "nop" or (op == "mov" and not f.cond):
+                return True
+            if op in ("add", "sub") and f.dst == 28 and f.srcs[0] == ("r", 28) \
+                    and f.srcs[1][0] == "i" and not f.cond:
+                sp += f.srcs[1][1] if op == "add" else -f.srcs[1][1]
+                return True
+            if op == "push":
+                stores += 1
+                sp -= 4
+                return True
+            if op == "pop":
+                loads += 1
+                sp += 4
+                return True
+            if op in ("st", "ld") and f.srcs[0] == ("r", 28) and not f.cond:
+                off = f.srcs[1]
+                if op == "st":
+                    if f.srcs[2][0] != "r":
+                        return False
+                    stores += 1
+                    if f.aa in (1, 2) and off[0] == "i":     # st.aw/.ab: a push
+                        sp += off[1]
+                else:
+                    if f.dst is None:
+                        return False
+                    loads += 1
+                    if f.aa in (1, 2) and off[0] == "i":     # ld.ab/.aw: a pop (a register increment
+                        sp += off[1]                         # need not be known: the restore returns)
+                return True
+            return False
+
+        while True:
+            if a in seen or len(seen) > limit:
+                return None
+            seen.add(a)
+            insn = program.insn(a)
+            if insn is None:
+                return None
+            f = insn.fields
+            op = f.op
+            if self.flow(insn)[0] == "return" and op == "j" and not f.cond and f.srcs[0] == ("r", BLINK):
+                if f.delay:                                  # the slot runs before the return
+                    nxt = program.insn(a + insn.size)
+                    if nxt is None or not apply(nxt):
+                        return None
+                break
+            if op == "b" and not f.cond and f.target is not None:
+                if f.delay:
+                    nxt = program.insn(a + insn.size)
+                    if nxt is None or not apply(nxt):
+                        return None
+                a = f.target
+                continue
+            if not apply(insn):
+                return None
+            a += insn.size
+        if stores and not loads:
+            return ("save", -sp)
+        if loads and not stores:
+            return ("restore", None)
+        return None
 
     # ---- what the case generator learns from the code (dread.autocase) ----
 

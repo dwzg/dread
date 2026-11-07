@@ -213,3 +213,149 @@ def test_arc_delay_slots_loops_and_flags_agree(tmp_path):
     for _ in range(4):
         x = (x + 7) ^ 4
     assert got[0][:4] == [26, 5, x, 13]
+
+
+# --- save and restore "millicode" helpers (dread.lift_arc._frame_helper) ---
+
+MILLI_C = r"""
+typedef unsigned int u32;
+u32 ext(u32 x) { return x * 2654435761u + 1u; }
+u32 mix(u32 a, u32 b, u32 c, u32 d, u32 e, u32 f, u32 g, u32 h)
+{
+    u32 s = ext(a) ^ b;
+    s = ext(s) ^ c; s = ext(s) ^ d; s = ext(s) ^ e;
+    s = ext(s) ^ f; s = ext(s) ^ g; s = ext(s) ^ h;
+    return s + a + b + c + d + e + f + g + h;
+}
+"""
+MILLI_LD = """ENTRY(mix)
+SECTIONS { . = 0x1000; .text : { *(.text .text.*) } . = ALIGN(4); .data : { *(.data*) }
+.bss : { *(.bss* COMMON) } /DISCARD/ : { *(.comment) *(.note*) } }
+"""
+# the target compiles the lifted C without -mmillicode (a reconstruction's own flags): its C saves
+# the registers its own way, calling no millicode (foreign_calls would drop one that called a
+# different variant than the original)
+MILLI_TOML = ARC_TARGET.replace('name = "arc-snippets"', 'name = "arc-milli"')
+
+
+@needs_arc_gcc
+def test_arc_save_restore_millicode_is_lifted(tmp_path):
+    """A function GCC compiled with -mmillicode: it saves the callee-saved registers it uses by a
+    call to __st_r13_to_rNN (stores into the frame it reserved) and returns by a tail-jump to
+    __ld_r13_to_rNN_ret (restores them, unwinds the frame, returns through blink). The lifter reads
+    those helpers' code (dread.lift_arc._frame_helper), treats the save call as the omitted saves and
+    the tail-jump as the epilogue; the lift check accepts mix and it agrees with the original on the
+    engine. The lifted C is compiled without -mmillicode (so it calls no millicode of its own)."""
+    from dread.emu import Layout, Machine
+    (tmp_path / "m.c").write_text(MILLI_C)
+    (tmp_path / "t.ld").write_text(MILLI_LD)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(MILLI_TOML)
+    elf = str(tmp_path / "original" / "t.elf")
+    subprocess.run(["arc-elf32-gcc", "-mcpu=arc600", "-Os", "-mmillicode", "-ffreestanding", "-fno-builtin",
+                    "-nostdlib", "-T", str(tmp_path / "t.ld"), "-Wl,--no-warn-rwx-segments", "-e", "mix",
+                    "-o", elf, str(tmp_path / "m.c"), "-lgcc"], check=True)
+    # the original really uses the save/restore helpers
+    dis = subprocess.run(["arc-elf32-objdump", "-d", elf], capture_output=True, text=True).stdout
+    assert "__st_r13_to_r" in dis and "__ld_r13_to_r" in dis and "_ret" in dis
+    from dread import elfimport
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    lifter = lift.make_lifter(p, regflow.analyse(p))
+    helper = next(fn for fn in p.functions if fn.name.startswith("__st_r13_to_r"))
+    assert lifter._frame_helper(helper.entry)[0] == "save"
+    helper = next(fn for fn in p.functions if fn.name.startswith("__ld_r13_to_r"))
+    assert lifter._frame_helper(helper.entry)[0] == "restore"
+    lines = []
+    assert "mix" in lift.check(t, t.image(), ["mix"], out=lines.append, jobs=1), "\n".join(lines)
+    work = tmp_path / "build" / "lift-check" / "main"
+    from dread.overlay import load_placement
+    aliases, _ = load_placement(str(work / "placement.json"))
+    rebuilt = (work / "payload.bin").read_bytes()
+    args = [(1, 2, 3, 4, 5, 6, 7, 8), (0, 0, 0, 0, 0, 0, 0, 0), (0xffffffff, 1, 2, 3, 4, 5, 6, 7),
+            (0x80000000, 0x7fffffff, 9, 10, 11, 12, 13, 14)]
+    for a in args:
+        orig = Machine(Layout(t, t.image()), t.image().payload(), None).call(p.by_name["mix"].entry, *a).ret
+        reb = Machine(Layout(t, t.image()), rebuilt, aliases).call(p.by_name["mix"].entry, *a).ret
+        assert orig == reb, (a, orig, reb)
+
+
+PUSH_HELPERS_S = """
+    .text
+    .global pusher, popper, worker, use
+    .align 4
+    .type pusher, @function
+pusher:                     ; a save helper that pushes r13, r14, r15 (st.aw), as hand-written code does
+    st.aw r15,[sp,-4]
+    st.aw r14,[sp,-4]
+    j.d [blink]
+    st.aw r13,[sp,-4]
+    .align 4
+    .type popper, @function
+popper:                     ; the matching restore helper: pop r13-r15 and blink, return
+    mov_s r12,0x4
+    mov_s r13,0xc
+    ld r15,[sp,0x8]
+    ld r14,[sp,0x4]
+    ld.ab r13,[sp,r13]
+    ld.ab blink,[sp,r12]
+    j_s [blink]
+    .align 4
+    .type worker, @function
+worker:                     ; uses r13-r15 across calls to use, so it saves the caller's (bl.d's slot
+    push_s blink            ; sets a scratch register, r12, not one being saved)
+    bl.d pusher
+    mov_s r12,r0
+    mov_s r13,r1
+    mov_s r14,r2
+    mov_s r0,r12
+    bl use
+    mov_s r15,r0
+    mov_s r0,r13
+    bl use
+    add_s r15,r15,r0
+    mov_s r0,r14
+    bl use
+    add_s r0,r0,r15
+    b popper
+    .align 4
+    .type use, @function
+use:                        ; a leaf the lifter can translate (r0 = r0*3 + 1)
+    asl_s r1,r0,1
+    add_s r0,r0,r1
+    add_s r0,r0,1
+    j_s [blink]
+"""
+
+
+@needs_arc_gcc
+def test_arc_push_style_save_restore_is_lifted(tmp_path):
+    """Hand-written save/restore helpers that push (st.aw) and pop (ld.ab), as firmware not compiled
+    with GCC's millicode has: a save helper reached by bl.d, a restore helper tail-jumped to that
+    unwinds and returns. worker saves r13-r15, uses them across calls, and returns through the
+    restore helper; the lift check accepts it and it agrees with the original on the engine."""
+    from dread.emu import Layout, Machine
+    from dread import elfimport
+    from dread.overlay import load_placement
+    (tmp_path / "t.s").write_text(PUSH_HELPERS_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arc-elf32-as", "-mcpu=arc600", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arc-elf32-ld", "-Ttext=0x0", "-e", "use", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(ARC_TARGET.replace('name = "arc-snippets"', 'name = "arc-push"'))
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    lifter = lift.make_lifter(p, regflow.analyse(p))
+    assert lifter._frame_helper(p.by_name["pusher"].entry) == ("save", 12)
+    assert lifter._frame_helper(p.by_name["popper"].entry)[0] == "restore"
+    lines = []
+    assert "worker" in lift.check(t, t.image(), ["worker", "use"], out=lines.append, jobs=1), "\n".join(lines)
+    work = tmp_path / "build" / "lift-check" / "main"
+    aliases, _ = load_placement(str(work / "placement.json"))
+    rebuilt = (work / "payload.bin").read_bytes()
+    for a in [(5, 7, 9), (0, 0, 0), (0xffffffff, 2, 3), (100, 200, 300)]:
+        orig = Machine(Layout(t, t.image()), t.image().payload(), None).call(p.by_name["worker"].entry, *a).ret
+        reb = Machine(Layout(t, t.image()), rebuilt, aliases).call(p.by_name["worker"].entry, *a).ret
+        assert orig == reb, (a, orig, reb)

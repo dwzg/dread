@@ -435,6 +435,42 @@ class ArcLifter(lift.Lifter):
                 found.setdefault(last, set()).add("lp_count")
         return undef, found
 
+    # ---- save and restore "millicode" helpers ----
+    # A compiler calls a shared routine to save the callee-saved registers it uses (GCC's
+    # -mmillicode __st_r13_to_rNN, stores into a frame the caller reserved; a hand-written variant
+    # pushes them) and tail-jumps to one that restores them, unwinds the frame and returns through
+    # blink (__ld_r13_to_rNN_ret). _frame_helper analyses such a routine from an entry: a pure leaf
+    # of stack stores (a "save") or stack loads (a "restore") and register moves, ending in a return.
+    # A call to a save helper is treated as the saves (no scratch clobbered, the stack pointer moved
+    # by what it pushes); a tail-jump to a restore helper as the function's epilogue (a return). The
+    # saved words are the C's own frame's, laid out by its compiler and not compared (saves_out's
+    # reason), so the C omits both. Facts come from the routine's code, not from its name (rule 2).
+
+    def _frame_helper(self, entry):
+        """("save", bytes pushed) or ("restore", None) of the frame helper at `entry`, else None
+        (the ARC layer's frame_helper: analysed from the routine's code)."""
+        return self.prog.arch.frame_helper(self.prog, entry)
+
+    def _save_call(self, insn):
+        """("save", depth pushed) when insn is an unconditional call of a save helper, else None."""
+        kind, target, _ = self.arch.flow(insn)
+        if kind != "call" or not isinstance(target, int) or insn.fields.cond:
+            return None
+        if self.prog.by_entry.get(target) is None:
+            return None
+        h = self._frame_helper(target)
+        return h if h is not None and h[0] == "save" else None
+
+    def _restore_jump(self, insn):
+        """Whether insn is an unconditional tail-jump to a restore helper (the function's epilogue)."""
+        kind, target, _ = self.arch.flow(insn)
+        if kind != "jump" or not isinstance(target, int) or insn.fields.cond:
+            return False
+        if self.prog.by_entry.get(target) is None:
+            return False
+        h = self._frame_helper(target)
+        return h is not None and h[0] == "restore"
+
     # ---- the stack pointer's depth and the frame (dread.lift's states) ----
 
     def ret_jump(self, insn, values):
@@ -486,7 +522,10 @@ class ArcLifter(lift.Lifter):
                 self._put(after, cname(f.dst), values.get(depth))
             return depth - 4, after
         move = self._sp_move(f)
-        if move is not None:
+        save = self._save_call(insn)
+        if save is not None:
+            new = depth + save[1]           # the words the save helper pushes (0 for a reserved frame)
+        elif move is not None:
             new = depth - move
         elif "sp" in writes:
             new = self.new_depth(insn, depth, values)
@@ -708,6 +747,8 @@ class ArcLifter(lift.Lifter):
             fx.hands |= (set(ARGS) | set(reads)) - {"sp"}
         elif kind == "return" or self.ret_jump(insn, values):
             fx.hands |= set(results)
+        elif kind == "jump" and self._restore_jump(insn):
+            fx.hands |= set(results)                                 # the epilogue: a restore helper
         elif kind == "jump" and callee is not None and target not in own:
             fx.hands |= set(ARGS) | set(self.leaves(callee))         # a tail call
         elif kind == "ijump":
@@ -770,6 +811,13 @@ class ArcLifter(lift.Lifter):
             if values.get(cname(src[1])) != self.RET:
                 raise Refused("0x%x returns to an address it computed, not to its caller" % a)
 
+    def leaves(self, fn):
+        """dread.lift's, except a frame helper reads none of its caller's registers for the C: the
+        registers it saves are the caller's own, left out with the frame (saves_out)."""
+        if self._frame_helper(fn.entry) is not None:
+            return []
+        return super().leaves(fn)
+
     def _wide(self, name):
         flow = self.flow
         return bool(flow and "r1" in flow.kept_regs(name) and "r1" not in flow.preserved_regs(name))
@@ -808,7 +856,10 @@ class ArcLifter(lift.Lifter):
 
     def after_call(self, insn):
         """What a call leaves written: the scratch registers, blink, the flags, lp_count, r57-r59; a
-        register the callee never writes (dread.regflow's preserved) keeps its value."""
+        register the callee never writes (dread.regflow's preserved) keeps its value. A save helper
+        preserves them all but blink (it only stores callee-saved registers and returns)."""
+        if self._save_call(insn) is not None:
+            return {"blink"}
         kind, target, _ = self.arch.flow(insn)
         callee = self.prog.by_entry.get(target) if kind == "call" and isinstance(target, int) else None
         if callee is not None and self.flow is not None:
@@ -822,7 +873,7 @@ class ArcLifter(lift.Lifter):
         index = {a: i for i, a in enumerate(fn.insns)}
         for a in states:
             insn = self.prog.insn(a)
-            if self.arch.flow(insn)[0] not in ("call", "icall"):
+            if self.arch.flow(insn)[0] not in ("call", "icall") or self._save_call(insn) is not None:
                 continue
             work = [(b, frozenset(LEFT_BY_CALLS)) for b in self.successors(fn, index, a, insn, False, states[a][1])]
             seen = set()
@@ -986,11 +1037,15 @@ class ArcLifter(lift.Lifter):
         if kind == "jump":
             if target in depth:
                 return "if (%s) goto L_%x;" % (cond, target) if cond else "goto L_%x;" % target
+            if self._restore_jump(insn):            # the epilogue: restore helper, unwind, return
+                return guard(self._return())
             callee = self.prog.by_entry.get(target)
             if callee is None:
                 raise Refused("0x%x jumps into other code (0x%x)" % (a, target))
             return guard("%s %s" % (self._call(callee, insn), self._return()))
         if kind == "call":
+            if self._save_call(insn) is not None:   # a save helper: its stores are the C's omitted saves
+                return ""
             callee = self.prog.by_entry.get(target)
             if callee is None:
                 raise Refused("0x%x calls into the middle of something (0x%x)" % (a, target))

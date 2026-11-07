@@ -94,7 +94,8 @@ import sys
 from dread.arch import code_address
 from dread import target as tgt
 
-VERSION = 35                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 36                # 36: ARC, a tail-jump to a register-restore helper is a return
+                            # (the layer's frame_helper); 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -1213,12 +1214,16 @@ class Analysis:
         def falls_into(i):
             return nxt(i) is not None and (code[i].kind in ("next", "call", "icall") or code[i].falls)
 
+        helper = getattr(self.program.arch, "frame_helper", None)
         for i, row in enumerate(code):
             kind, target = row.kind, row.target
             if kind == "jump":
                 t = self.program.code_address(target)
                 if t in index:
                     succ[i].append(index[t])
+                elif helper is not None and entry_name(t) and not row.conditional \
+                        and (helper(self.program, t) or (None,))[0] == "restore":
+                    returns.append(i)       # a tail-jump to a register-restore helper: the epilogue
                 elif entry_name(t):
                     tails.append((i, entry_name(t)))
                 else:
