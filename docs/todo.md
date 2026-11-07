@@ -6927,16 +6927,21 @@ toolchain and the engine's check").
   parent's callee-saved registers as pointers, and its generated cases fault. Tell them apart (a
   target that reads callee-saved registers before writing them, or the parent's frame, is the
   parent's block), or join them to their parent where the extent allows.
-- [ ] **regflow: values that only pass through.** A private ARC600 firmware saves STATUS32 with
-  `lr rX,[status32]` and puts it back with `flag rX` (an interrupt-state critical section), so the
-  flags a caller left reach its return unchanged. regflow takes the lr for a read of the caller's
-  flags, which then makes every function in front of such a call on some path "leave flags its
-  callers read", and the lifter refuses them: about three in five of the functions whose callers
-  read their flags there (measured by taking the read out, which is not safe: the flags do flow
-  through r13 and back). Wanted: a register whose entry value reaches only the same register at
-  the return (through another register and back) is neither read nor written for the callers;
-  callee-saved pushes are such a case regflow already handles. Test on our own code (an assembled
-  ARC function that saves and restores STATUS32 around a compare).
+- [x] **regflow: flags that only pass through.** A private ARC600 firmware saves STATUS32 with
+  `lr rX,[status32]` and puts it back with `flag rX` (an interrupt-atomic section), so the flags a
+  caller left reach its return unchanged. Done 2026-11-07: the layer's flag_save_pairs finds the
+  lr/flag pair on a straight run (the restore's register still holding the saved flag bits), and
+  regflow registers it as a neutral save (its copies machinery, the same that pairs a register
+  saved in the frame with its restore): the save reads the flags only where the restored flags are
+  read before a return, so a function that only saves and restores them neither reads nor leaves
+  its caller's flags, and its callers are not bound to set them; the lifter's leaves trusts that.
+  Tested on our own code (tests/test_lift_arc.py). The input side ("calls a flag-saving helper")
+  cleared; the output side (a caller genuinely reads a function's result flags) stays a hard limit:
+  the lifted C cannot preserve the hardware flags across the original/C boundary.
+- [ ] **ARC: stack arguments and extra result registers.** About a hundred EC functions take
+  arguments beyond the eight in registers, and about a hundred leave a result in a register beyond
+  r0:r1 that a caller reads. The ARC lifter refuses both; the RISC-V lifter wraps them with a naked
+  entry (dread.lift_riscv render, MORE). Port that to ARC.
 - [x] **dread discover: vector tables of fewer slots.** Done for ARC (2026-11-07: the table ends at
   the first slot that is no j limm; a private ARC600 image has fewer than 32 and code behind them).
 

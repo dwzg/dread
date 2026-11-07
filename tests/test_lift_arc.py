@@ -410,3 +410,67 @@ def test_arc_lr_flag_status32_is_lifted(tmp_path):
         orig = Machine(Layout(t, t.image()), t.image().payload(), None).call(p.by_name["crit"].entry, *a).ret
         reb = Machine(Layout(t, t.image()), rebuilt, aliases).call(p.by_name["crit"].entry, *a).ret
         assert orig == reb, (a, orig, reb)
+
+
+PASSTHROUGH_S = """
+    .text
+    .global savf, caller, use
+    .align 4
+    .type savf, @function
+savf:                       ; r0 * 3 in an interrupt-atomic section: it saves and restores STATUS32,
+    lr r12,[status32]       ; so it neither reads nor leaves its caller's flags (a pass-through)
+    bic r11,r12,2
+    flag r11
+    asl_s r1,r0,1
+    add_s r0,r0,r1
+    flag r12
+    j_s [blink]
+    .align 4
+    .type caller, @function
+caller:                     ; calls savf; it is not bound to set flags for it
+    push_s blink
+    bl savf
+    add_s r0,r0,1
+    pop_s blink
+    j_s [blink]
+    .align 4
+    .type use, @function
+use:
+    asl_s r1,r0,1
+    add_s r0,r0,r1
+    j_s [blink]
+"""
+
+
+@needs_arc_gcc
+def test_arc_flags_saved_and_restored_are_pass_through(tmp_path):
+    """A function that saves STATUS32 with lr and restores it with flag (an interrupt-atomic section)
+    neither reads nor leaves its caller's flags: dread.regflow pairs the lr and the flag as a neutral
+    save (the layer's flag_save_pairs), so savf reads only r0, and its caller is not bound to set the
+    flags. Both lift and agree with the original on the engine."""
+    from dread.emu import Layout, Machine
+    from dread import elfimport
+    from dread.overlay import load_placement
+    (tmp_path / "t.s").write_text(PASSTHROUGH_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arc-elf32-as", "-mcpu=arc600", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arc-elf32-ld", "-Ttext=0x0", "-e", "use", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(ARC_TARGET.replace('name = "arc-snippets"', 'name = "arc-pass"'))
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    flow = regflow.analyse(p)
+    assert "flags" not in flow.read_regs("savf"), sorted(flow.read_regs("savf"))
+    assert "flags" not in flow.kept_regs("savf")
+    lines = []
+    acc = lift.check(t, t.image(), ["savf", "caller", "use"], out=lines.append, jobs=1)
+    assert {"savf", "caller"} <= set(acc), "\n".join(lines)
+    work = tmp_path / "build" / "lift-check" / "main"
+    aliases, _ = load_placement(str(work / "placement.json"))
+    rebuilt = (work / "payload.bin").read_bytes()
+    for name in ("savf", "caller"):
+        for a in [(5, 0, 0), (0, 0, 0), (0xffffffff, 0, 0), (123456, 0, 0)]:
+            orig = Machine(Layout(t, t.image()), t.image().payload(), None).call(p.by_name[name].entry, *a).ret
+            reb = Machine(Layout(t, t.image()), rebuilt, aliases).call(p.by_name[name].entry, *a).ret
+            assert orig == reb, (name, a, orig, reb)

@@ -496,6 +496,60 @@ class Arc:
             return ("restore", None)
         return None
 
+    def flag_save_pairs(self, program, fn):
+        """[(save address, restore address)] of a flags save/restore around a critical section: lr
+        rX,[status32] saves STATUS32 (the flags among its bits), the code clears an interrupt-enable
+        bit and does its work, then flag/sr rZ,[status32] restores it, rZ still holding rX's flag
+        bits (bits 8-11). dread.regflow pairs them like a register saved in the frame and restored
+        (its neutral-save machinery): the save reads the flags only where the restored flags are
+        read before a return, so a function that only saves and restores them does not read its
+        caller's flags. Conservative: one straight run (no branch, jump, call or loop between, which
+        would move the flags or the saving register); the restore's register is rX, or rX with only
+        its non-flag bits changed by a constant (bic/or by K, K & 0xf00 == 0; and by K, K & 0xf00 ==
+        0xf00). Other shapes are left unpaired."""
+        status = ("i", D.AUX_NUMBERS["status32"])
+        insns = {a: program.insn(a) for a in fn.insns}
+        pairs = []
+        for a in fn.insns:
+            ins = insns.get(a)
+            if ins is None or ins.fields.op != "lr" or ins.fields.aux != status or ins.fields.dst is None:
+                continue
+            holders = {ins.fields.dst}          # registers holding the saved value's flag bits
+            b, prev = a + ins.size, ins
+            while True:
+                nxt = insns.get(b)
+                if nxt is None or prev.address + prev.size != b:
+                    break                       # not the straight run's next instruction
+                f = nxt.fields
+                if self.flow(nxt)[0] != "next" or f.op in ("lp", "ext", "unknown"):
+                    break                       # a branch/jump/call/loop: the run (and holders) end
+                if (f.op in ("flag", "sr")) and f.srcs and f.srcs[0][0] == "r" and f.srcs[0][1] in holders \
+                        and (f.op == "flag" or f.aux == status):
+                    pairs.append((a, b))
+                    break
+                dst = f.dst
+                if dst is not None and dst < 61:
+                    src = self._flag_copy(f, holders)   # rZ keeps the saved flag bits, or not
+                    (holders.add if src else holders.discard)(dst)
+                prev, b = nxt, b + nxt.size
+        return pairs
+
+    @staticmethod
+    def _flag_copy(f, holders):
+        """Whether f writes a register that still holds its source's flag bits (bits 8-11): a plain
+        copy, or bic/or by a constant clear of those bits, or and by a constant keeping them."""
+        if f.cond or not f.srcs or f.srcs[0][0] != "r" or f.srcs[0][1] not in holders:
+            return False
+        if f.op == "mov":
+            return True
+        if len(f.srcs) == 2 and f.srcs[1][0] == "i":
+            k = f.srcs[1][1] & 0xFFFFFFFF
+            if f.op in ("bic", "or", "xor", "bset", "bclr"):
+                return not (k & 0xF00)
+            if f.op == "and":
+                return (k & 0xF00) == 0xF00
+        return False
+
     # ---- what the case generator learns from the code (dread.autocase) ----
 
     generator_version = 2       # in the generated-case cache's key: bump when these change

@@ -812,11 +812,18 @@ class ArcLifter(lift.Lifter):
                 raise Refused("0x%x returns to an address it computed, not to its caller" % a)
 
     def leaves(self, fn):
-        """dread.lift's, except a frame helper reads none of its caller's registers for the C: the
-        registers it saves are the caller's own, left out with the frame (saves_out)."""
+        """dread.lift's, with two exceptions. A frame helper reads none of its caller's registers for
+        the C (the registers it saves are the caller's own, left out with the frame: saves_out). And
+        the flags a function only saves and restores (dread.regflow's pass-through, flag_save_pairs)
+        are not read of its caller: regflow cleared them, so the function's callers are not bound to
+        set the flags (the function reads the hardware flags itself but its result does not depend on
+        them)."""
         if self._frame_helper(fn.entry) is not None:
             return []
-        return super().leaves(fn)
+        out = super().leaves(fn)
+        if "flags" in out and self.flow is not None and "flags" not in self.flow.read_regs(fn.name):
+            out = [r for r in out if r != "flags"]
+        return out
 
     def _wide(self, name):
         flow = self.flow

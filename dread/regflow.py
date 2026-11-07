@@ -94,7 +94,8 @@ import sys
 from dread.arch import code_address
 from dread import target as tgt
 
-VERSION = 36                # 36: ARC, a tail-jump to a register-restore helper is a return
+VERSION = 37                # 37: ARC, flags saved by lr [status32] and restored by flag are a
+                            # neutral save (_neutral_flag_saves); 36: a tail-jump to a register-restore helper is a return
                             # (the layer's frame_helper); 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
@@ -1009,6 +1010,7 @@ class Analysis:
         self.copies = {}                    # name -> {save index: (restore index, register bit)} (_neutral_saves)
         for fn in program.functions:
             self._neutral_saves(fn)
+            self._neutral_flag_saves(fn)
         self._saved_reads = self._callee_saved_reads()
         for fn in program.functions:
             self._dead_saved_writes(fn)
@@ -1529,6 +1531,28 @@ class Analysis:
                 if o != live_out[i] or v != live_in[i]:
                     live_out[i], live_in[i], changed = o, v, True
         return live_out, live_in[0], effects
+
+    def _neutral_flag_saves(self, fn):
+        """The flags saved and restored around a critical section (the layer's flag_save_pairs: lr
+        [status32] ... flag/sr [status32]) are a neutral save, as a register saved in the frame and
+        restored is: the save reads the flags only where the restored flags are read before a return
+        (self.copies), and the restore does not change them for the function's callers. A function
+        that only saves and restores STATUS32 to keep interrupts atomic then neither reads nor leaves
+        its caller's flags, so the lifter need not reproduce them and its callers are not bound to
+        set them."""
+        pairs = getattr(self.program.arch, "flag_save_pairs", None)
+        if pairs is None or "flags" not in self.bit:
+            return
+        code = self.rows[fn.name]
+        index = {row.address: i for i, row in enumerate(code)}
+        bit = self.bit["flags"]
+        for save, restore in pairs(self.program, fn):
+            i, j = index.get(save), index.get(restore)
+            if i is None or j is None:
+                continue
+            code[i] = code[i]._replace(uses=code[i].uses & ~bit)
+            code[j] = code[j]._replace(writes=code[j].writes & ~bit)
+            self.copies.setdefault(fn.name, {})[i] = (j, bit)
 
     def _callee_saved_reads(self):
         """{name: the callee-saved registers fn reads from its caller} (bit masks over _saved_names),
