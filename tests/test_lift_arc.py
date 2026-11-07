@@ -30,15 +30,16 @@ def lift_gizmo_arc():
 
 
 def test_gizmo_arc_lifts():
-    """Of gizmo-arc's functions only the startup (mov sp, limm) and two of libgcc's 64-bit
-    multiplication are refused: __muldi3 sets r1 for __umulsidi3 in bl.d's slot, which
-    dread.regflow takes for a read behind the call (it does not know delay slots yet). Every name of
-    the lifted table lifts."""
+    """Of gizmo-arc's functions only the startup (mov sp, limm) and one of libgcc's 64-bit
+    multiplications are refused: __muldi3 reads r2 behind its call of __umulsidi3, which dread.regflow
+    takes for a read of what the callee leaves (a C call does not hand r2 back to it). __umulsidi3
+    itself lifts: its callers read r2, a result beyond r0:r1, which its naked entry hands back
+    (dread.lift's more_results). Every name of the lifted table lifts."""
     target, image, program, lifter, lifted, refused = lift_gizmo_arc()
     assert refused.pop("_start") == "0x100 changes the stack pointer in a way not modelled: mov sp,0x110000"
     assert "reads r2 behind the call of __umulsidi3" in refused.pop("__muldi3")
-    assert "its callers read r2" in refused.pop("__umulsidi3")
     assert refused == {}
+    assert "__attribute__((naked)) void __umulsidi3(void)" in lifted["__umulsidi3"].text
     from dread.build import read_names
     table = read_names(image.table("lifted"))
     assert len(table) >= 30 and set(table) <= set(lifted)
@@ -658,3 +659,75 @@ def test_arc_preserved_flags_read_by_callers_are_wrapped(tmp_path):
         orig = Machine(Layout(t, t.image()), t.image().payload(), None).call(p.by_name["caller"].entry, 0, 0, r2, r3).ret
         reb = Machine(Layout(t, t.image()), rebuilt, aliases).call(p.by_name["caller"].entry, 0, 0, r2, r3).ret
         assert orig == reb == (100 if r2 == r3 else 7), (r2, r3, orig, reb)
+
+
+# --- extra result registers: the naked entry that hands them back (dread.lift's more_results) ---
+
+EXTRA_RESULT_S = """
+    .text
+    .global caller, extra, use
+    .align 4
+; extra leaves a result in r2 (an extra result) besides r0 that its caller reads: C returns r0
+; only, so the function is lifted with a naked entry that reserves an area, the body stores r2
+; there, and the entry loads it into the hardware register before returning (dread.lift.more_results).
+    .type extra, @function
+extra:
+    add_s r0,r0,1
+    add_s r2,r0,r0
+    j_s [blink]
+    .align 4
+; caller reads r2 after the call: returns (a+1) + 2*(a+1) = 3*(a+1). It relies on extra leaving r2.
+    .type caller, @function
+caller:
+    push_s blink
+    bl extra
+    add_s r0,r0,r2
+    pop_s blink
+    j_s [blink]
+    .align 4
+    .type use, @function
+use:
+    asl_s r1,r0,1
+    add_s r0,r0,r1
+    j_s [blink]
+"""
+
+
+@needs_arc_gcc
+def test_arc_extra_result_register_is_handed_back(tmp_path):
+    """A function that leaves a result in a register beyond r0:r1 that a caller reads (dread.lift's
+    more_results): C returns r0 and r1 only, so render gives it a naked entry that reserves an area,
+    passes its address as the ninth argument, and loads the register from the area (where the body
+    stored it at each return, _more_out) into the hardware register before returning (ArcLifter.MORE).
+    The lift check accepts it, and an original (not lifted) caller that reads the register agrees with
+    the original image when the function is replaced by its C."""
+    from dread import elfimport
+    from dread.emu import Layout, Machine
+    from dread.overlay import load_placement
+    (tmp_path / "t.s").write_text(EXTRA_RESULT_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arc-elf32-as", "-mcpu=arc600", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arc-elf32-ld", "-Ttext=0x0", "-e", "use", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(ARC_TARGET.replace('name = "arc-snippets"', 'name = "arc-extra"'))
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    flow = regflow.analyse(p)
+    lifter = lift.make_lifter(p, flow)
+    assert lifter.more_results("extra") == ["r2"]
+    text = lifter.lift(p.by_name["extra"]).text
+    assert "__attribute__((naked)) void extra(void)" in text
+    assert "u32 extra_dread_body(u32 p0" in text and "u32 more)" in text
+    assert "*(volatile u32 *)(more) = r2;" in text          # the body stores the extra result
+    lines = []
+    assert "extra" in lift.check(t, t.image(), ["extra", "use"], out=lines.append, jobs=1), "\n".join(lines)
+    # the point: extra is now C, caller stays the original; an original caller reads the register
+    # extra leaves, and the rebuilt image agrees with the original.
+    work = tmp_path / "build" / "lift-check" / "main"
+    aliases, _ = load_placement(str(work / "placement.json"))
+    rebuilt = (work / "payload.bin").read_bytes()
+    for a in [1, 5, 0, 0xffffffff, 100]:
+        orig = Machine(Layout(t, t.image()), t.image().payload(), None).call(p.by_name["caller"].entry, a).ret
+        reb = Machine(Layout(t, t.image()), rebuilt, aliases).call(p.by_name["caller"].entry, a).ret
+        assert orig == reb == (3 * (a + 1)) & 0xffffffff, (a, orig, reb)

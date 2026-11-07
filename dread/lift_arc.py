@@ -13,7 +13,11 @@ restores touch are not in the array at all (dread.lift's saves_out). A function 
 arguments (words above its entry stack pointer, beyond the eighth register argument) is wrapped, as
 dread.lift does on ARM and RISC-V: a naked entry reserves the original's frame below the entry's
 stack pointer and calls the body with that stack pointer as its ninth argument (sp0, the first word
-on the stack), so frame and stack arguments are real memory where the original has them. A call passes r0-r7 and takes
+on the stack), so frame and stack arguments are real memory where the original has them. A function
+whose callers read a result in a register beyond r0:r1 that it sets (r2-r12: dread.lift's
+more_results) is given a naked entry too: it reserves an area, calls the body with the area's
+address as its ninth argument, and loads the registers from it (where the body stored them at each
+return) before returning, so the callers find them where the original leaves them. A call passes r0-r7 and takes
 r0 (r0 and r1 when the callers read a 64-bit result); r1-r12 are 0 behind it unless the callee
 never writes one (dread.regflow's preserved: libgcc's __udivmodsi4 keeps r7, in which __umodsi3
 keeps its return address), and a function that reads lp_count, r57-r59 or a flag behind a call
@@ -65,9 +69,11 @@ are not lifted yet), mul64 and mulu64 (C would call libgcc), ilink1 and ilink2 a
 core registers r32-r56, an extension condition (0x10-0x1f), a function with stack arguments that
 cannot be wrapped (an interrupt handler, or a compiler without naked functions), a restore or
 epilogue fragment reached by a tail-jump (it reads above its entry while unwinding below it, not a
-function that reads stack arguments), callers that read a register beyond r0 and r1 that the
-function sets (no naked entry hands them back here), a call of a function that takes stack
-arguments, and what dread.lift refuses for every architecture (a stack
+function that reads stack arguments), callers that read the flags a function sets (not only
+preserves), a function whose extra results cannot be handed back (it also takes stack arguments or
+preserves flags its callers read, both not yet combined with the entry that hands them back, or it
+has no free register for that entry), a call of a function that takes stack arguments, and what
+dread.lift refuses for every architecture (a stack
 pointer that differs between paths or is not followed, a fall-through out of the function, a
 register read before written).
 
@@ -83,6 +89,10 @@ REGS = GENERAL + ["sp", "blink", "lp_count", "r57", "r58", "r59"]
 VARS = [r for r in REGS if r != "sp"]               # the C's register variables
 ARGS = tuple("r%d" % i for i in range(8))
 SCRATCH = tuple("r%d" % i for i in range(13))
+# beyond a C result (r0, or r0 and r1 when wide): the scratch registers a caller may read that the
+# function sets, handed back by a naked entry (dread.lift's more_results; render). r1 is never here:
+# a caller that reads it makes the function wide (r1 the second result).
+MORE = tuple("r%d" % i for i in range(2, 13))
 AFTER_CALL = set(SCRATCH) | {"blink", "flags", "lp_count", "r57", "r58", "r59"}
 LEFT_BY_CALLS = ("lp_count", "r57", "r58", "r59", "flags:z", "flags:n", "flags:c", "flags:v")
 M = 0xFFFFFFFF
@@ -193,7 +203,7 @@ class ArcView:
 
 
 class ArcLifter(lift.Lifter):
-    REGS, ARGS, AFTER_CALL, MORE = REGS, ARGS, AFTER_CALL, ()
+    REGS, ARGS, AFTER_CALL, MORE = REGS, ARGS, AFTER_CALL, MORE
 
     def __init__(self, program, flow=None, endless=None):
         super().__init__(program, flow, endless)
@@ -906,10 +916,39 @@ class ArcLifter(lift.Lifter):
         kept = set(flow.kept_regs(fn.name)) - result
         if "flags" in kept and not self._preserves_read_flags(fn):
             raise Refused("its callers read the flags it leaves (%s)" % flow.why(fn.name, "flags"))
-        written = sorted(kept - set(flow.preserved_regs(fn.name)) - {"flags"})
+        written = sorted(kept - set(flow.preserved_regs(fn.name)) - {"flags"} - set(self.MORE))
         if written:
             raise Refused("its callers read %s, which it sets (%s); C returns r0 and r1 only" % (
                 written[0], flow.why(fn.name, written[0])))
+        more = self.more_results(fn.name)
+        why = self.cannot_return_more(fn) if more else None
+        if why:
+            raise Refused("its callers read %s, which it sets (%s); C returns r0 and r1 only, and %s" % (
+                more[0], flow.why(fn.name, more[0]), why))
+
+    def cannot_return_more(self, fn):
+        """Why fn's C cannot hand back its more_results through a naked entry, or None. Besides
+        dread.lift's reasons (no naked functions, an exception handler): not yet combined here with
+        the stack-argument wrapper or the flag-preserving wrapper (each is its own naked entry), and
+        a function with too few free registers for the entry's temporary (_wrap_temp)."""
+        base = super().cannot_return_more(fn)
+        if base:
+            return base
+        if self.stack_args(fn):
+            return "it also takes stack arguments (not yet handed back together here)"
+        if self._preserves_read_flags(fn):
+            return "it also preserves flags its callers read (not yet handed back together here)"
+        if self._wrap_temp(fn) is None:
+            return "its entry that hands them back has no free register (r8-r12 all read by callers)"
+        return None
+
+    def _wrap_temp(self, fn):
+        """One scratch register the more-results entry may use to pass the area's address (render):
+        r8-r12 that the callers do not read (not in kept) and that is not an argument register, so the
+        body still gets r0-r7 and nothing the callers read is clobbered. None when none is free."""
+        kept = set(self.flow.kept_regs(fn.name)) if self.flow is not None else set()
+        free = [r for r in ("r12", "r11", "r10", "r9", "r8") if r not in kept]
+        return free[0] if free else None
 
     def _check_after_call(self, callee, insn, bind=False):
         """As the ARM translator's: a register the callee never writes keeps the caller's value; one
@@ -1357,7 +1396,11 @@ class ArcLifter(lift.Lifter):
         return "((u64)r1 << 32 | r0)" if self._wide(self.ctx["fn"].name) else "r0"
 
     def _return(self):
-        return "return %s;" % self._ret() if self._ret() else "return;"
+        # the registers a naked entry hands back are stored into its area first (more_results); the
+        # entry loads them from there before it returns (render), so the callers find them in place.
+        more = self._more_out()
+        r = self._ret()
+        return more + ("return %s;" % r if r else "return;")
 
     def _call(self, callee, insn, bind=False):
         if not IDENT.match(callee.name):
@@ -1457,6 +1500,28 @@ class ArcLifter(lift.Lifter):
                          'add sp, sp, %d\\n\\tj [blink]");' % (frame, body_name, frame))
             lines.append("}")
             lines.append("__attribute__((noinline, used)) %s %s(%s, u32 sp0)" % (result, body_name, params))
+            lines.append("{")
+            init = body_init
+        elif ctx.get("more"):
+            # the function leaves a result in a register beyond r0:r1 that a caller reads (more_results):
+            # a naked entry reserves an area, calls the body with the area's address as its ninth
+            # argument (more), and loads the registers from the area into the hardware registers before
+            # returning, so the callers find them where the original leaves them. The body stores them
+            # into the area at each return (_more_out). Its temporary is r8-r12 the callers do not read
+            # and not an argument register, so the body gets r0-r7 and nothing the callers read is lost.
+            body_name = fn.name + "_dread_body"
+            more = ctx["more"]
+            room = 8 + self.more_area(more)
+            tmp = self._wrap_temp(fn)
+            loads = "".join("ld %s, [sp, %d]\\n\\t" % (r, 8 + 4 * i) for i, r in enumerate(more))
+            lines.append("%s %s(%s, u32 more);" % (result, body_name, params))
+            lines.append("__attribute__((naked)) void %s(void)" % fn.name)
+            lines.append("{")
+            lines.append('    __asm__ volatile ("sub sp, sp, %d\\n\\tst blink, [sp, 4]\\n\\tadd %s, sp, 8\\n\\t'
+                         'st %s, [sp, 0]\\n\\tbl %s\\n\\tld blink, [sp, 4]\\n\\t%sadd sp, sp, %d\\n\\tj [blink]");'
+                         % (room, tmp, tmp, body_name, loads, room))
+            lines.append("}")
+            lines.append("__attribute__((noinline, used)) %s %s(%s, u32 more)" % (result, body_name, params))
             lines.append("{")
             init = body_init
         elif self._preserves_read_flags(fn):

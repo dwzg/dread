@@ -6,6 +6,7 @@ __mulsi3
 __udivmodsi4
 __udivsi3
 __umodsi3
+__umulsidi3
 apply_config
 beep_off
 beep_on

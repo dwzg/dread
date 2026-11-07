@@ -6950,10 +6950,18 @@ toolchain and the engine's check").
   (computed returns, delay-slot entries, callee-saved reads read before written) whose stack-args
   refusal had masked the real reason; the figure that motivated this item was a misdiagnosis. The
   wrapper stands for targets that do have stack-argument functions and for ARM/RISC-V parity.
-- [ ] **ARC: extra result registers.** A function that leaves a result in a register beyond r0:r1
-  that a caller reads: the RISC-V lifter hands it back through the naked entry (dread.lift_riscv
-  render, MORE; dread.lift more_results). The ARC lifter refuses it (ArcLifter.MORE = ()). Port that
-  — but a real lever only where those callers are themselves lifting; measure before starting.
+- [x] **ARC: extra result registers.** Done 2026-11-07: a function that leaves a result in a register
+  beyond r0:r1 (r2-r12) that a caller reads is given a naked entry that reserves an area, calls the
+  body with the area's address as its ninth argument, and loads the registers from it (where the body
+  stored them at each return) into the hardware registers before returning, so the callers find them
+  where the original leaves them (ArcLifter.MORE; dread.lift's more_results, more_entry on ARM;
+  tests/test_lift_arc.py). The mechanism is dread.lift's own, proven on ARM and RISC-V; ARC supplies
+  MORE and the entry's assembly. It is sound for callers that are not themselves lifted, unlike the
+  flags case: the entry puts the real computed value in the hardware register. gizmo-arc's
+  __umulsidi3 now lifts this way. The yield on a private firmware was modest — most functions with an
+  extra result have a deeper blocker too (the flags-set limit, a bad function boundary) — but real.
+  Not combined yet with the stack-argument wrapper or the flag-preserving wrapper (each its own naked
+  entry); such a function is refused (cannot_return_more), a bounded follow-up.
 - [x] **ARC: flags a function preserves, read by its callers.** Done 2026-11-07: a function that
   leaves the hardware flags unchanged (dread.regflow's preserved) yet whose callers read them after
   the call was refused ("its callers read the flags it leaves"), though the flags they read are

@@ -34,7 +34,7 @@ is safe to run on hardware.
 
 <!-- status: written by bin/dread status from docs/todo.md, the gizmo builds' tables and the bench recipe; do not edit by hand -->
 
-39 commands, 1,265 test functions run by CI on every push, 42 FreeRTOS builds in the benchmark on 4 architectures (`dread bench`). What each part does: [docs/features.md](docs/features.md); what comes next: [docs/todo.md](docs/todo.md).
+39 commands, 1,266 test functions run by CI on every push, 42 FreeRTOS builds in the benchmark on 4 architectures (`dread bench`). What each part does: [docs/features.md](docs/features.md); what comes next: [docs/todo.md](docs/todo.md).
 
 | Architecture | Gizmo builds: lifted / functions | FreeRTOS builds | Progress |
 |---|---|---|---|
@@ -44,7 +44,7 @@ is safe to run on hardware.
 | MSP430 | msp430 79 / 130 | 1 | paused · `██████░░░░` 12 of 19 steps |
 | x86, 32-bit (i386) | i386 – / 47 · i386clang – / 47 | 3 | `████████░░` 59 of 75 steps |
 | MIPS32 | mips – / 47 | – | paused |
-| ARC (ARCompact, ARC600) | arc 36 / 54 | – | `██████░░░░` 13 of 20 steps |
+| ARC (ARCompact, ARC600) | arc 37 / 54 | – | `███████░░░` 14 of 20 steps |
 | AArch64 | – | – | planned |
 | PowerPC 32 | – | – | planned |
 | ARM big-endian (BE-8) | – | – | planned |
@@ -71,7 +71,7 @@ Gizmo (`examples/gizmo`) is DREAD's own test firmware, built for each architectu
 | [More compilers](docs/todo.md#more-compilers) | `░░░░░░░░░░` | 0 of 6 |
 | [Scale and robustness](docs/todo.md#scale-and-robustness) | `████░░░░░░` | 4 of 9 |
 | [Documentation and packaging](docs/todo.md#documentation-and-packaging) | `██░░░░░░░░` | 1 of 4 |
-| [ARC](docs/todo.md#arc-arcompact-arc600-the-user-2026-11-07) | `██████░░░░` | 13 of 20 |
+| [ARC](docs/todo.md#arc-arcompact-arc600-the-user-2026-11-07) | `███████░░░` | 14 of 20 |
 
 Complete: [Cortex-M4](docs/todo.md#cortex-m4-armv7e-m-with-fpv4-sp-the-user-2026-10-19-first-among-the-new-architectures).
 

@@ -9,6 +9,33 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## ARC: hand back extra result registers through a naked entry (2026-11-07)
+
+**Decided by the user** ("port the extra-result handling"), after measuring it as the next lever
+(docs/todo.md "ARC: extra result registers").
+
+- **Question.** A function that leaves a result in a register beyond r0:r1 (r2-r12) that a caller
+  reads was refused — C returns r0 and r1 only. How to lift it?
+- **Choice.** Port dread.lift's `more_results` machinery, already proven on ARM and RISC-V: set
+  `ArcLifter.MORE` to r2-r12, and give such a function a naked entry that reserves an area, calls the
+  body with the area's address as its ninth argument (the first word on the stack), and loads the
+  registers from the area into the hardware registers before returning. The body stores them into the
+  area at each return (dread.lift's `_more_out`, wired into ArcLifter._return). The base already does
+  almost all of it; ARC supplies MORE, the entry's assembly in render, and the `_check_kept` /
+  `cannot_return_more` gating.
+- **Why sound for every caller** (unlike the flags-preserve case): the entry puts the real computed
+  value in the actual hardware register before returning, so a caller that is not itself lifted reads
+  the correct value. The entry's one temporary is r8-r12 the callers do not read and not an argument
+  register (_wrap_temp), so the body still gets r0-r7 and nothing the callers read is clobbered.
+- **Scope.** Not yet combined with the stack-argument wrapper (31 functions) or the flag-preserving
+  wrapper (39) — each is its own naked entry, and composing them is a bounded follow-up; such a
+  function is refused cleanly (cannot_return_more), never mislifted. The yield on a private firmware
+  was modest: most functions with an extra result have a deeper blocker too (the flags-set limit, a
+  bad function boundary). gizmo-arc's __umulsidi3 now lifts this way, exercising the path.
+- **Undo.** `ArcLifter.MORE = ()`; drop the `more` branch of render, the `_more_out` in _return, and
+  the `cannot_return_more`/`_wrap_temp` additions.
+- **Status.** In the code (dread.lift_arc, tests/test_lift_arc.py; examples/gizmo/arc lifts 37).
+
 ## ARC: lift a flag-preserving function whose callers read its flags, by wrapping it (2026-11-07)
 
 **Decided by the user**, who chose this lever over cleaning up the restore-fragment accounting
