@@ -41,10 +41,12 @@ frame) take the pair in the order it runs: whatever leads to the branch leads to
 leads to the branch, and the branch to its targets and to what follows the slot (successors). The
 C writes the pair where the branch is: the branch's condition (or a jump's register) into dc first,
 which the slot may change, then the slot's statement, then the branch (`dc = !z; slot; if (dc) goto
-L;`); a call's slot sets its arguments before it. Refused: a slot that something other than its
-branch reaches (a jump into it, another instruction that falls into it), a slot that is itself a
-branch, jump, call, lp or delay slot, a slot that writes the register a jump goes through, a
-function that begins with a delayed branch.
+L;`); a call's slot sets its arguments before it. A function may begin with a delayed branch (an
+accessor such as j [blink] with a load in its slot): its slot runs first, then the branch, as in the
+middle of a function, so the analyses start at the slot (entry_node). Refused: a slot that something
+other than its branch reaches (a jump into it, another instruction that falls into it), a slot that
+is itself a branch, jump, call, lp or delay slot, a slot that writes the register a jump goes
+through, a function whose entry's delay slot lies outside it.
 
 Zero-overhead loops. lp sets LP_START (behind it) and LP_END (its target, loop_body); its C is
 nothing, an lpcc whose condition fails `if (!COND) goto L_end;`. The body's last instruction (the
@@ -316,13 +318,19 @@ class ArcLifter(lift.Lifter):
 
     def _walk(self, fn):
         prog = self.prog
-        if self._delayed(fn.entry):
-            raise Refused("0x%x: it begins with a delayed branch" % fn.entry)
         room = _Inside(fn, prog)
         reached, branch_of, direct, lps = set(), {}, {}, set()
         self._walking[getattr(fn, "key", fn.name)] = branch_of      # (falls_into, meanwhile)
         loops = {}
         work = [fn.entry]
+        if self._delayed(fn.entry):
+            # the function begins with a delayed branch: its slot runs first, then the branch, as in
+            # the middle of a function. No predecessor leads to the slot, so pair them here.
+            s = fn.entry + prog.insn(fn.entry).size
+            if s not in room:
+                raise Refused("0x%x: the delay slot of its entry lies outside the function" % fn.entry)
+            branch_of[s] = fn.entry
+            work.append(s)
         while work:
             a = work.pop()
             if a in reached:
@@ -416,6 +424,11 @@ class ArcLifter(lift.Lifter):
             return self.walk(fn)
         except Refused:
             return set(), {}, {}
+
+    def entry_node(self, fn):
+        """Where a path through fn starts: its slot where the entry is a delayed branch (the slot
+        runs first, then the branch, as in the middle of a function), else the entry."""
+        return self._redirect(fn.insns[0])
 
     def successors(self, fn, index, address, insn, strict=True, values=None):
         """dread.lift's successors in the order instructions run: a delayed branch's predecessors

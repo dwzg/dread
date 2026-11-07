@@ -6975,6 +6975,23 @@ toolchain and the engine's check").
   the flags limit had blocked. Not done: a function that *sets* the flags its callers read
   (the dominant flags refusal); its final flags are computed deep in the body, where the epilogue
   would clobber them before a wrapper could read them — no clean exit to restore from.
+- [x] **ARC: a function that begins with a delayed branch.** Done 2026-11-07: such a function (an
+  accessor like `j [blink]` with a load in its slot, or a `b.d`/`bl.d`/`brge.d` at the entry) was
+  refused, though it is a valid shape — the slot runs first, then the branch, as in the middle of a
+  function. The lifter now sets the pair up at the entry (_walk) and starts its analyses at the slot
+  through a base hook (Lifter.entry_node, used by states and entry_states; the default is the entry,
+  so no other architecture changes). On a private firmware 80 lift, 73 confirm. Two functions the
+  check had accepted before now refuse correctly: with delayed-entry functions no longer black boxes,
+  the inter-procedural leaves analysis sees they hand a register through a tail-call chain to a real
+  reader, which C cannot do — their earlier acceptance rested on the truncated analysis
+  (docs/decisions.md). Found while investigating the discover "boundary problem", which turned out to
+  be this lifter gap, not a discover one.
+- [ ] **ARC: a register a function reads that its caller left (callee-saved, through a tail call).**
+  The inter-procedural analysis now (delayed-entry work) correctly refuses a function that hands a
+  register its caller left through a tail-call chain to a reader, because C cannot pass an arbitrary
+  register across a tail call. Modelling such a tail call (passing the register) would re-lift them;
+  dread.regflow's "known gap" names this (callee-saved registers a function reads that its caller
+  left are not analysed). Not scheduled; measure before starting.
 - [ ] **ARC: shared restore/epilogue fragments listed as functions.** The function table lists the
   shared restore and epilogue tails that other functions tail-jump into as standalone functions, and
   interrupt dispatch machinery (context-save routines reached by per-vector thunks) likewise. They

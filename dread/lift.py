@@ -579,6 +579,12 @@ class Lifter:
         call = self._fp_call(self._call(callee, insn, bind=True) if self.ctx.get("more") else self._call(callee, insn))
         return "%s %s" % (call, self._return())
 
+    def entry_node(self, fn):
+        """The instruction a path through fn starts at, where the analyses seed the entry state: the
+        entry itself for every architecture but where it runs a delay slot first (ARC, a function
+        that begins with a delayed branch: the slot runs at the entry, then the branch)."""
+        return fn.insns[0]
+
     def states(self, fn, strict=True, switch=False):
         """{address: (depth, values)} before every instruction a path from the entry reaches.
         depth: how many bytes the stack pointer is below its value at the entry. values: what is
@@ -595,9 +601,10 @@ class Lifter:
             return self._states[key]
         prog, arch = self.prog, self.arch
         index = {a: i for i, a in enumerate(fn.insns)}
-        states = {fn.insns[0]: (0, self.entry_values())}
+        node = self.entry_node(fn)
+        states = {node: (0, self.entry_values())}
         resume = {}             # a conditional return -> the state behind it (_pops_to_return)
-        work = [fn.insns[0]]
+        work = [node]
         while work:
             a = work.pop()
             insn = prog.insn(a)
@@ -1075,7 +1082,8 @@ class Lifter:
         ekey = (getattr(fn, "key", fn.name), frozenset(given))
         if ekey in self._entry:
             return self._entry[ekey]
-        self._entry[ekey] = ({fn.insns[0]: frozenset()}, {})   # what a recursive call sees meanwhile
+        node = self.entry_node(fn)          # the slot first where the entry is a delayed branch (ARC)
+        self._entry[ekey] = ({node: frozenset()}, {})   # what a recursive call sees meanwhile
         prog, arch = self.prog, self.arch
         index = {a: i for i, a in enumerate(fn.insns)}
         try:
@@ -1098,13 +1106,13 @@ class Lifter:
                 tuple(self.more_results(fn.name))
         except Exception:
             results = ("r0",)
-        undef_at, partial_at, found = {fn.insns[0]: start}, {fn.insns[0]: frozenset()}, {}
+        undef_at, partial_at, found = {node: start}, {node: frozenset()}, {}
         # (register, the caller's register its value is a copy of): mov r1, r6 hands what the caller
         # left in r6 on; a call that takes r1 then reads the caller's r6 (a compiler's shared code)
-        origin_at = {fn.insns[0]: frozenset()}
+        origin_at = {node: frozenset()}
         # frame slots (by depth) holding what the caller left in a register: (slot, its register)
-        slots_at = {fn.insns[0]: frozenset()}
-        work = [fn.insns[0]]
+        slots_at = {node: frozenset()}
+        work = [node]
         while work:
             a = work.pop()
             insn = prog.insn(a)

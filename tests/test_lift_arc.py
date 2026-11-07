@@ -731,3 +731,83 @@ def test_arc_extra_result_register_is_handed_back(tmp_path):
         orig = Machine(Layout(t, t.image()), t.image().payload(), None).call(p.by_name["caller"].entry, a).ret
         reb = Machine(Layout(t, t.image()), rebuilt, aliases).call(p.by_name["caller"].entry, a).ret
         assert orig == reb == (3 * (a + 1)) & 0xffffffff, (a, orig, reb)
+
+
+# --- a function that begins with a delayed branch (dread.lift_arc.entry_node) ---
+
+DELAYED_ENTRY_S = """
+    .text
+    .global caller, getfield, loopfn, use
+    .align 4
+; getfield begins with a delayed return: its slot (the load) runs first, then the branch returns.
+; A valid accessor the lifter now handles by starting the analyses at the slot (entry_node).
+    .type getfield, @function
+getfield:
+    j_s.d [blink]
+    ld_s r0,[r1,0x10]
+    .align 4
+; loopfn begins with a delayed branch into its own body: the slot (an add) runs, then the branch.
+; It adds r2 to r0 once per loop while r1 counts down (the count decremented in brne.d's slot).
+    .type loopfn, @function
+loopfn:
+    b.d .L1
+    add_s r0,r0,r2
+.L0:
+    add_s r0,r0,r2
+.L1:
+    brne.d r1,0,.L0
+    sub_s r1,r1,1
+    j_s [blink]
+    .align 4
+; caller reads a field through getfield (r1 the pointer), adds one
+    .type caller, @function
+caller:
+    push_s blink
+    mov_s r1,r0
+    bl getfield
+    add_s r0,r0,1
+    pop_s blink
+    j_s [blink]
+    .align 4
+    .type use, @function
+use:
+    asl_s r1,r0,1
+    add_s r0,r0,r1
+    j_s [blink]
+"""
+
+
+@needs_arc_gcc
+def test_arc_function_begins_with_a_delayed_branch(tmp_path):
+    """A function whose entry is a delayed branch runs its slot first, then the branch, as in the
+    middle of a function. The lifter now starts its analyses at the slot (ArcLifter.entry_node,
+    dread.lift's states and entry_states) instead of refusing. getfield (j [blink] with a load in
+    its slot) and loopfn (a delayed branch into its own body) lift, the lift check accepts them, and
+    they agree with the original on the engine."""
+    from dread import elfimport
+    from dread.emu import Layout, Machine
+    from dread.overlay import load_placement
+    (tmp_path / "t.s").write_text(DELAYED_ENTRY_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arc-elf32-as", "-mcpu=arc600", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arc-elf32-ld", "-Ttext=0x0", "-e", "use", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(ARC_TARGET.replace('name = "arc-snippets"', 'name = "arc-dslot"'))
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    lifter = lift.make_lifter(p, regflow.analyse(p))
+    assert lifter._delayed(p.by_name["getfield"].entry) and lifter._delayed(p.by_name["loopfn"].entry)
+    text = lifter.lift(p.by_name["getfield"]).text
+    assert "r0 = *(volatile u32 *)(r1 + 0x10u); return r0;" in text   # slot then branch, at the entry
+    names = ["getfield", "loopfn", "caller", "use"]
+    lines = []
+    assert {"getfield", "loopfn", "caller"} <= set(lift.check(t, t.image(), names, out=lines.append, jobs=1)), \
+        "\n".join(lines)
+    work = tmp_path / "build" / "lift-check" / "main"
+    aliases, _ = load_placement(str(work / "placement.json"))
+    rebuilt = (work / "payload.bin").read_bytes()
+    for name, args in [("loopfn", (3, 4, 5)), ("loopfn", (0, 1, 7)), ("loopfn", (10, 2, 1))]:
+        orig = Machine(Layout(t, t.image()), t.image().payload(), None).call(p.by_name[name].entry, *args).ret
+        reb = Machine(Layout(t, t.image()), rebuilt, aliases).call(p.by_name[name].entry, *args).ret
+        assert orig == reb, (name, args, orig, reb)

@@ -9,6 +9,31 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## ARC: lift a function that begins with a delayed branch (2026-11-07)
+
+**Decided by the user** ("take on the lifter delayed-entry work"), after a boundary investigation
+found the discover tool's boundaries essentially correct and this the real lever.
+
+- **Finding.** The biggest refusal bucket, "it begins with a delayed branch", was not a boundary
+  error: these are valid functions whose entry is a delayed branch — accessors (`j [blink]` with a
+  load in its slot) and functions starting with `b.d`/`bl.d`/`brge.d`. The slot runs first, then the
+  branch, exactly as in the middle of a function. The lifter refused the shape outright.
+- **Choice.** Handle it. The `_walk` sets the pair up at the entry (branch_of[slot] = entry); the
+  analyses start at the slot, which runs first, through a new base hook `Lifter.entry_node(fn)`
+  (`fn.insns[0]` for every architecture, the slot for a delayed ARC entry) used to seed `states` and
+  `entry_states`. ARC's successors/`_redirect` already model a slot running before its branch; only
+  the start, which has no predecessor to redirect, needed the hook. No other architecture changes
+  (the default is the entry).
+- **Result.** On a private firmware 80 such functions lift and 73 confirm. gizmo-arc is unchanged.
+  Two functions that the lift check had accepted before now refuse — correctly: once the delayed-entry
+  functions in a tail-call chain are no longer black boxes, dread.lift's inter-procedural leaves
+  analysis sees that those two hand a register (r11) through the chain to a function that really reads
+  it (a `bmsk ...,r11`), which C cannot do across a tail call. Their earlier acceptance rested on the
+  truncated analysis; the change makes it complete and is strictly sounder (net, far more lift).
+- **Undo.** Restore the `_walk` refusal of a delayed entry; `Lifter.entry_node` and its two uses in
+  states/entry_states can stay (a no-op without the ARC override).
+- **Status.** In the code (dread.lift base hook, dread.lift_arc, tests/test_lift_arc.py).
+
 ## ARC: hand back extra result registers through a naked entry (2026-11-07)
 
 **Decided by the user** ("port the extra-result handling"), after measuring it as the next lever
