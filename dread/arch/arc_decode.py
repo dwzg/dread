@@ -407,7 +407,7 @@ def _general(w, major, pcl, limm):
         return _alu(w, EXT_GEN[sub], b, p, setf, c, a, limm)
     if sub in (0x04, 0x05):
         return _mul64(w, "mul64" if sub == 4 else "mulu64", b, p, setf, c, a, limm)
-    if sub in EXT_OTHER and (p == 0 or sub not in (0x3A, 0x3B)):  # dmulpf, dmacpf: registers only
+    if sub in EXT_OTHER:                # (the engine runs none; objdump takes some forms of each)
         f = _alu(w, EXT_OTHER[sub], b, p, setf, c, a, limm)
         if f.op != "unknown":
             f.op = "ext"
