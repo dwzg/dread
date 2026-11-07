@@ -92,4 +92,7 @@ def get(spec):
     if name == "x86":
         from dread.arch.x86 import X86
         return X86(**options)
-    raise ValueError("unknown architecture %r (known: arm, riscv, msp430, mips, x86)" % (name,))
+    if name == "arc":
+        from dread.arch.arc import Arc
+        return Arc(**options)
+    raise ValueError("unknown architecture %r (known: arm, riscv, msp430, mips, x86, arc)" % (name,))

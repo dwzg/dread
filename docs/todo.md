@@ -7258,6 +7258,31 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 - [ ] A reference page per tool (from the docstrings, checked by a test that every command has one).
 - [ ] `pip install` from the repository works in a clean environment; version and changelog.
 
+## ARC (ARCompact, ARC600) (the user, 2026-11-07)
+
+A new architecture: ARCompact, a 16-/32-bit little-endian ISA that neither capstone nor Unicorn
+knows, so the layer decodes it itself and will run it on an engine of DREAD's own, as the MSP430's
+does. The order follows docs/porting.md. The decoder's facts are checked against binutils'
+`arc-elf32-as`/`objdump` (the decision in docs/decisions.md).
+
+- [x] **Decoding and flow.** `dread/arch/arc.py`: the register model, the instruction length
+  (16- or 32-bit, with a 32-bit long immediate where an operand field is the code 0x3e -- including
+  the 16-bit h-register forms and the destination forms, mov/nop, that look like one but are not),
+  and the control flow (B/Bcc with their targets, BL/BR, the register jumps j/jl and returns through
+  blink). Registered in `dread/arch/__init__.py`. Done 2026-11-07 with a test on ground truth from
+  the assembler (tests/test_arch_arc.py); the length decoder was checked against a whole 192 KB ARC
+  image's objdump disassembly, agreeing on every instruction (the few left are data the linear
+  disassembly reads as code). Not yet: 16-bit control-flow targets (j_s/b_s), the LD reg+reg limm,
+  and the operand text.
+- [ ] **A gizmo ARC build.** An ARC GCC (prebuilt or built), a start file and linker script for the
+  core, the Makefile rules and a target directory with its `dread.toml`; `dread import-elf`,
+  `dread functions` and `dread asm --verify` on it. (Needs the ARC GCC: a question for the user, or
+  built like the binutils were.)
+- [ ] **The operand text** (`arch.asm()` with GNU as) so `dread asm --verify` round-trips.
+- [ ] **The engine** (`dread/engines/arc.py`, a Python ARCompact interpreter behind the engine
+  contract), checked against an independent simulator; `dread test` on functions rewritten in C.
+- [ ] regflow (the calling convention), switches, noreturn; then the system run; then the lifter.
+
 ## Known gaps (not scheduled)
 
 - Case generation does Python work per buffer byte a function reads (a value pick, a memory entry):

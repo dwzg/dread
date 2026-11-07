@@ -9,6 +9,38 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## ARC (ARCompact) decoder and its toolchain (2026-11-07)
+
+**Decided by recommendation**, starting the ARC architecture the user asked for (`dread/arch/arc.py`,
+docs/todo.md "ARC (ARCompact, ARC600)").
+
+- **Question.** How does the layer decode ARCompact, and where does its assembler for `dread asm`
+  come from, given that neither capstone nor Unicorn knows ARC?
+- **Options.** Decoding: (a) decode the bits in the layer, as the MSP430's does; (b) shell out to
+  binutils' `arc-elf32-objdump` and parse its text; (c) drive Ghidra's ARC processor. Assembler:
+  (d) binutils' `arc-elf32-as` (GNU as, as the ARM layer uses); (e) llvm-mc.
+- **Choice.** (a) and (d). (a) is what the porting guide sets out and keeps the output deterministic
+  and the register and flow facts structured, where parsing text (b) is fragile and version-bound and
+  Ghidra (c) is a heavier dependency for per-instruction decode. (d) matches the ARM layer; GNU as is
+  the reference assembler for the ARC GCC the gizmo build will use.
+- **Why.** Consistency with the existing layers and determinism (rule 5).
+- **How to undo.** Remove the `arc` branch from `dread/arch/__init__.py` and delete `dread/arch/arc.py`.
+- **Status.** In the code: decoding (instruction length with the long immediate, and control flow)
+  and its test are in; the operand text, calling convention and engine are later steps.
+
+## Development prerequisites on a fresh machine (2026-11-07)
+
+**Decided by recommendation.** A fresh checkout had no `.venv` and its tests needed tools the machine
+lacked. Installing a development toolchain is normally a question for the user (CLAUDE.md), but the
+user had asked for ARC work, which needs the suite to run, and granted passwordless sudo.
+
+- **Choice.** Installed `python3.13-venv`, `gcc-arm-none-eabi`, `clang` and `lld` (apt), and the
+  Python extras `pyelftools` and `z3-solver` into `.venv`; built binutils' ARC `as`/`ld`/`objdump`
+  from the coreboot GCC's binutils source under the user's home (not in this repo). With these the
+  fast suite is green (the remaining skips need Ghidra or Playwright).
+- **How to undo.** `apt remove` the packages; delete `.venv`. None of this is in the repository.
+- **Status.** Done. An ARC GCC for a gizmo ARC build (the next prerequisite) is not installed yet.
+
 ## Division routines as / and % (2026-10-25)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), from docs/todo.md's

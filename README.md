@@ -34,7 +34,7 @@ is safe to run on hardware.
 
 <!-- status: written by bin/dread status from docs/todo.md, the gizmo builds' tables and the bench recipe; do not edit by hand -->
 
-38 commands, 1,226 test functions run by CI on every push, 42 FreeRTOS builds in the benchmark on 4 architectures (`dread bench`). What each part does: [docs/features.md](docs/features.md); what comes next: [docs/todo.md](docs/todo.md).
+38 commands, 1,231 test functions run by CI on every push, 42 FreeRTOS builds in the benchmark on 4 architectures (`dread bench`). What each part does: [docs/features.md](docs/features.md); what comes next: [docs/todo.md](docs/todo.md).
 
 | Architecture | Gizmo builds: lifted / functions | FreeRTOS builds | Progress |
 |---|---|---|---|
@@ -70,6 +70,7 @@ Gizmo (`examples/gizmo`) is DREAD's own test firmware, built for each architectu
 | [More compilers](docs/todo.md#more-compilers) | `░░░░░░░░░░` | 0 of 6 |
 | [Scale and robustness](docs/todo.md#scale-and-robustness) | `████░░░░░░` | 4 of 9 |
 | [Documentation and packaging](docs/todo.md#documentation-and-packaging) | `██░░░░░░░░` | 1 of 4 |
+| [ARC](docs/todo.md#arc-arcompact-arc600-the-user-2026-11-07) | `██░░░░░░░░` | 1 of 5 |
 
 Complete: [Performance, first pass](docs/todo.md#performance-first-pass), [Phase 5: system run](docs/todo.md#phase-5-system-run), [Performance, second pass](docs/todo.md#performance-second-pass-2026-10-18-asked-for-by-the-user), [Performance, third pass](docs/todo.md#performance-third-pass-2026-10-19-asked-for-by-the-user), [Phase 7: reading aids, plugin, documentation](docs/todo.md#phase-7-reading-aids-plugin-documentation), [After the ARM phases](docs/todo.md#after-the-arm-phases), [Cortex-M4](docs/todo.md#cortex-m4-armv7e-m-with-fpv4-sp-the-user-2026-10-19-first-among-the-new-architectures), [C++](docs/todo.md#c).
 
