@@ -6938,10 +6938,28 @@ toolchain and the engine's check").
   Tested on our own code (tests/test_lift_arc.py). The input side ("calls a flag-saving helper")
   cleared; the output side (a caller genuinely reads a function's result flags) stays a hard limit:
   the lifted C cannot preserve the hardware flags across the original/C boundary.
-- [ ] **ARC: stack arguments and extra result registers.** About a hundred EC functions take
-  arguments beyond the eight in registers, and about a hundred leave a result in a register beyond
-  r0:r1 that a caller reads. The ARC lifter refuses both; the RISC-V lifter wraps them with a naked
-  entry (dread.lift_riscv render, MORE). Port that to ARC.
+- [x] **ARC: stack arguments (the naked-entry wrapper).** Done 2026-11-07: a function that reads
+  arguments beyond the eight in registers (words above its entry stack pointer) is wrapped, as the
+  ARM and RISC-V lifters do. A naked entry reserves the original's frame below the entry stack
+  pointer and calls the body with that stack pointer as its ninth argument (sp0); the body reads the
+  frame at `sp0 - k` and the stack arguments at `sp0 + off` (dread.lift_arc.lift and render,
+  tests/test_lift_arc.py). A restore or epilogue fragment reached by a tail-jump reads above its
+  entry while unwinding below it; it is not a stack-argument reader and is refused, not wrapped
+  (ArcLifter._unwinds_below_entry). On the private EC firmware the wrapper confirmed nothing new:
+  what the stack-args detector flagged were such fragments or functions with deeper blockers
+  (computed returns, delay-slot entries, callee-saved reads read before written) whose stack-args
+  refusal had masked the real reason; the figure that motivated this item was a misdiagnosis. The
+  wrapper stands for targets that do have stack-argument functions and for ARM/RISC-V parity.
+- [ ] **ARC: extra result registers.** A function that leaves a result in a register beyond r0:r1
+  that a caller reads: the RISC-V lifter hands it back through the naked entry (dread.lift_riscv
+  render, MORE; dread.lift more_results). The ARC lifter refuses it (ArcLifter.MORE = ()). Port that
+  — but a real lever only where those callers are themselves lifting; measure before starting.
+- [ ] **ARC: shared restore/epilogue fragments listed as functions.** The function table lists the
+  shared restore and epilogue tails that other functions tail-jump into as standalone functions;
+  they read the registers their caller left and cannot lift on their own (now refused as fragments,
+  _unwinds_below_entry). Recognising them the way the frame-helper machinery recognises save/restore
+  millicode would stop them counting as refused functions. This is the real blocker behind most of
+  what looked like ARC stack arguments.
 - [x] **dread discover: vector tables of fewer slots.** Done for ARC (2026-11-07: the table ends at
   the first slot that is no j limm; a private ARC600 image has fewer than 32 and code behind them).
 

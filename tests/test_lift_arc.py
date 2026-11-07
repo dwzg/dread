@@ -474,3 +474,107 @@ def test_arc_flags_saved_and_restored_are_pass_through(tmp_path):
             orig = Machine(Layout(t, t.image()), t.image().payload(), None).call(p.by_name[name].entry, *a).ret
             reb = Machine(Layout(t, t.image()), rebuilt, aliases).call(p.by_name[name].entry, *a).ret
             assert orig == reb, (name, a, orig, reb)
+
+
+# --- stack arguments: the naked-entry wrapper (dread.lift_arc.lift, render) ---
+
+STACKARGS_C = r"""
+typedef unsigned int u32;
+u32 leaf(u32 x) { return x * 3u + 1u; }
+u32 stackargs(u32 a, u32 b, u32 c, u32 d, u32 e, u32 f, u32 g, u32 h, u32 i, u32 j)
+{
+    u32 s = leaf(a) ^ b ^ c ^ d ^ e ^ f ^ g ^ h;
+    s = leaf(s) ^ i;
+    s = leaf(s) ^ j;
+    return s + i * 7u + j;
+}
+"""
+STACKARGS_LD = """ENTRY(stackargs)
+SECTIONS { . = 0x1000; .text : { *(.text .text.*) } . = ALIGN(4); .data : { *(.data*) }
+.bss : { *(.bss* COMMON) } /DISCARD/ : { *(.comment) *(.note*) } }
+"""
+
+
+@needs_arc_gcc
+def test_arc_stack_arguments_are_wrapped(tmp_path):
+    """A function that reads arguments beyond the eighth (ARC passes eight in registers, the rest on
+    the stack above the entry stack pointer): the lifter wraps it, as on ARM and RISC-V. A naked
+    entry reserves the original's frame below the entry stack pointer and calls the body with that
+    stack pointer as its ninth argument (sp0); the body reads the frame at sp0 - k and the stack
+    arguments at sp0 + off. The lift check accepts it (generated cases, every instruction run) and it
+    agrees with the original on the engine for hand-chosen inputs."""
+    from dread.emu import Layout, Machine
+    from dread import elfimport
+    from dread.overlay import load_placement
+    (tmp_path / "s.c").write_text(STACKARGS_C)
+    (tmp_path / "t.ld").write_text(STACKARGS_LD)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(ARC_TARGET.replace('name = "arc-snippets"', 'name = "arc-stackargs"'))
+    elf = str(tmp_path / "original" / "t.elf")
+    subprocess.run(["arc-elf32-gcc", "-mcpu=arc600", "-Os", "-ffreestanding", "-fno-builtin", "-nostdlib",
+                    "-T", str(tmp_path / "t.ld"), "-Wl,--no-warn-rwx-segments", "-e", "stackargs",
+                    "-o", elf, str(tmp_path / "s.c"), "-lgcc"], check=True)
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    lifter = lift.make_lifter(p, regflow.analyse(p))
+    fn = p.by_name["stackargs"]
+    assert lifter.stack_args(fn) == 2 and lifter.can_wrap(fn)
+    text = lifter.lift(fn).text
+    assert "__attribute__((naked)) void stackargs(void)" in text
+    assert "u32 stackargs_dread_body(u32 p0" in text and "u32 sp0)" in text
+    assert "(sp0 + 0)" in text and "(sp0 + 4)" in text  # the ninth and tenth arguments
+    assert "(sp0 - 4)" in text                           # the frame (saved blink)
+    lines = []
+    assert "stackargs" in lift.check(t, t.image(), ["stackargs", "leaf"], out=lines.append, jobs=1), "\n".join(lines)
+    work = tmp_path / "build" / "lift-check" / "main"
+    aliases, _ = load_placement(str(work / "placement.json"))
+    rebuilt = (work / "payload.bin").read_bytes()
+    args = [(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), (0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            (0xffffffff, 1, 2, 3, 4, 5, 6, 7, 0x80000000, 0x7fffffff),
+            (11, 22, 33, 44, 55, 66, 77, 88, 99, 123456)]
+    for a in args:
+        orig = Machine(Layout(t, t.image()), t.image().payload(), None).call(p.by_name["stackargs"].entry, *a).ret
+        reb = Machine(Layout(t, t.image()), rebuilt, aliases).call(p.by_name["stackargs"].entry, *a).ret
+        assert orig == reb, (a, orig, reb)
+
+
+RESTORE_FRAG_S = """
+    .text
+    .global restorefrag, use
+    .align 4
+    .type restorefrag, @function
+restorefrag:                ; a shared restore/epilogue fragment reached by a tail-jump: it pops
+    pop_s r14               ; registers it never pushed (reaching above its entry) and returns,
+    j_s.d [blink]           ; unwinding its stack pointer below the entry. Not a stack-argument
+    pop_s r13               ; reader; the lifter refuses it rather than wrapping it.
+    .align 4
+    .type use, @function
+use:
+    asl_s r1,r0,1
+    add_s r0,r0,r1
+    j_s [blink]
+"""
+
+
+@needs_arc_gcc
+def test_arc_restore_fragment_is_not_wrapped(tmp_path):
+    """A restore or epilogue fragment entered by a tail-jump reads above its entry stack pointer (the
+    registers a caller saved) while unwinding below it. It is not a function that reads stack
+    arguments, so the lifter refuses it (the wrapper would reserve a frame it never had); the guard
+    is dread.lift_arc.ArcLifter._unwinds_below_entry."""
+    from dread import elfimport
+    (tmp_path / "t.s").write_text(RESTORE_FRAG_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arc-elf32-as", "-mcpu=arc600", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arc-elf32-ld", "-Ttext=0x0", "-e", "use", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(ARC_TARGET.replace('name = "arc-snippets"', 'name = "arc-frag"'))
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    lifter = lift.make_lifter(p, regflow.analyse(p))
+    fn = p.by_name["restorefrag"]
+    assert lifter._unwinds_below_entry(fn)
+    with pytest.raises(lift.Refused, match="unwinding below it"):
+        lifter.lift(fn)

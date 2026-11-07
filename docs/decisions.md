@@ -9,6 +9,35 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## ARC: keep the stack-argument wrapper although it confirmed nothing on the EC (2026-11-07)
+
+**Decided by the user**, who chose "keep + guard" when the measurement came back (docs/todo.md
+"ARC: stack arguments").
+
+- **Question.** The naked-entry wrapper for ARC stack arguments was built, correct and tested on
+  gizmo (a function reading a ninth and tenth argument lifts and the lift check accepts it), sound
+  (the check rejects what it gets wrong), and consistent with the ARM and RISC-V lifters. But on the
+  private EC firmware it confirmed no new functions: what the stack-args detector flagged were, in
+  the two cases that lifted, shared restore/epilogue fragments reached by a tail-jump (they read the
+  registers a caller saved while unwinding the stack below their own entry), and the rest had deeper
+  blockers (computed returns, delay-slot entries, callee-saved reads) whose stack-args refusal had
+  only come first. The "about a hundred stack-argument functions" that motivated the item was a
+  misdiagnosis. Keep the wrapper, drop it, or keep it with a guard?
+- **Options.** (a) **Keep + guard**: commit the wrapper, and refuse a fragment that unwinds its
+  stack pointer above its entry (ArcLifter._unwinds_below_entry) rather than wrapping it — those
+  fragments stay a clean, instant refusal instead of being wrapped, compiled and dropped at check
+  time. (b) **Keep as-is**: correct and sound, but every such fragment is wrapped, compiled and
+  dropped each check (wasted effort). (c) **Drop it**: revert, since it gains nothing on this target.
+- **Choice.** (a). The wrapper is the standard, sibling-consistent mechanism and stands for targets
+  that do have stack-argument functions; the guard keeps the misclassified fragments cheap and
+  names what they are. The real lever the measurement revealed — the shared restore/epilogue
+  fragments listed as standalone functions — is a separate todo item.
+- **Why.** A correct, tested, sound feature the user asked for, with no regression (gizmo-arc
+  unchanged), and the guard removes the only downside the measurement showed.
+- **Undo.** `ArcLifter.can_wrap` returns False again and `lift` refuses any stack_args > 0;
+  remove `_unwinds_below_entry` and the wrapped branch of `render`.
+- **Status.** In the code (dread.lift_arc, tests/test_lift_arc.py).
+
 ## ARC lifter: delay slots, the loop's back edge, inline tables, GCC's multiplications (2026-11-07)
 
 **Decided by recommendation**, for the first ARC lifter (docs/todo.md "ARC", dread.lift_arc).

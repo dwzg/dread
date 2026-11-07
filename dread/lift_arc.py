@@ -9,7 +9,11 @@ statically at every instruction (dread.lift's states: push_s and pop_s, st.aw rN
 ld.ab rN,[sp,4], any other write-back through sp, add and sub of sp with an immediate, mov sp from a
 frame pointer), so an access at sp, or at a register that holds a frame address, is one into the
 frame array; the words at the frame's top that only the prologue's saves and the epilogue's
-restores touch are not in the array at all (dread.lift's saves_out). A call passes r0-r7 and takes
+restores touch are not in the array at all (dread.lift's saves_out). A function that reads stack
+arguments (words above its entry stack pointer, beyond the eighth register argument) is wrapped, as
+dread.lift does on ARM and RISC-V: a naked entry reserves the original's frame below the entry's
+stack pointer and calls the body with that stack pointer as its ninth argument (sp0, the first word
+on the stack), so frame and stack arguments are real memory where the original has them. A call passes r0-r7 and takes
 r0 (r0 and r1 when the callers read a 64-bit result); r1-r12 are 0 behind it unless the callee
 never writes one (dread.regflow's preserved: libgcc's __udivmodsi4 keeps r7, in which __umodsi3
 keeps its return address), and a function that reads lp_count, r57-r59 or a flag behind a call
@@ -58,9 +62,12 @@ Refused, with the reason: an instruction the engine has no semantics for (the ex
 operations, asls and asrs, sat16, rnd16, abssw, negsw, mpyw, mpyuw: C multiplies through libgcc on
 the ARC600) or that acts on the core (flag, lr, sr, sleep, brk, j.f [ilink1]: interrupt handlers
 are not lifted yet), mul64 and mulu64 (C would call libgcc), ilink1 and ilink2 and the extension
-core registers r32-r56, an extension condition (0x10-0x1f), stack arguments (ARC passes eight
-arguments in registers), callers that read a register beyond r0 and r1 that the function sets (no
-naked entry hands them back here), and what dread.lift refuses for every architecture (a stack
+core registers r32-r56, an extension condition (0x10-0x1f), a function with stack arguments that
+cannot be wrapped (an interrupt handler, or a compiler without naked functions), a restore or
+epilogue fragment reached by a tail-jump (it reads above its entry while unwinding below it, not a
+function that reads stack arguments), callers that read a register beyond r0 and r1 that the
+function sets (no naked entry hands them back here), a call of a function that takes stack
+arguments, and what dread.lift refuses for every architecture (a stack
 pointer that differs between paths or is not followed, a fall-through out of the function, a
 register read before written).
 
@@ -762,16 +769,50 @@ class ArcLifter(lift.Lifter):
     # ---- what kind of function ----
 
     def lift(self, fn):
+        """The C of fn. A function that reads stack arguments (words above its entry stack pointer,
+        beyond the eighth register argument) is wrapped, as dread.lift does on ARM and RISC-V: a
+        naked entry reserves the original's frame below the entry's stack pointer and calls the body
+        with that stack pointer as its ninth argument (sp0, the first word on the stack), so the
+        frame and the stack arguments are real memory where the original has them (render)."""
         self._wrapping = False
         n = self.stack_args(fn)
         if n:
-            raise Refused("it takes %d stack words (arguments beyond the eighth)" % n)
-        full = self._full(fn)
-        self.walk(full)                     # (its refusals)
-        return self._lift(full)
+            if self._unwinds_below_entry(fn):
+                raise Refused("it reads above its entry stack pointer while unwinding below it "
+                              "(a restore or epilogue fragment reached by a tail-jump, not stack arguments)")
+            if not self.can_wrap(fn):
+                raise Refused("it takes %d stack words (arguments beyond the eighth)" % n)
+            self._wrapping = True           # its stack arguments as they lie, behind the wrapper (render)
+        try:
+            full = self._full(fn)
+            self.walk(full)                 # (its refusals)
+            return self._lift(full)
+        finally:
+            self._wrapping = False
+
+    def _unwinds_below_entry(self, fn):
+        """Whether the stack pointer ever rises above the entry (a reachable state at negative depth):
+        the function pops or unwinds words it did not push, reaching into the caller's frame. That is
+        the mark of a shared restore or epilogue fragment entered by a tail-jump, whose reads above
+        the entry are register restores, not of a function that reads stack arguments (which keeps
+        its stack pointer at or below its entry). Such a fragment is refused, not wrapped: the wrapper
+        would reserve a frame the fragment never had and hand it a stack pointer the restores miss."""
+        try:
+            states = self.states(fn, strict=False, switch=True)
+        except Refused:
+            return False
+        return any(depth is not None and depth < 0 for depth, _ in states.values())
 
     def can_wrap(self, fn):
-        return False
+        """Whether fn's C can get the original's frame on the real stack (render's wrapper): a
+        function that returns to its caller (not an interrupt handler), compiled by GCC or clang
+        (naked functions)."""
+        if self.prog.target.compiler.kind not in ("gcc", "clang"):
+            return False
+        try:
+            return not self.handler_kind(fn)
+        except Refused:
+            return False
 
     def compiled_isa(self):
         return self.arch.isa
@@ -1234,12 +1275,16 @@ class ArcLifter(lift.Lifter):
             else:
                 k = depth if f.aa == 2 else depth - off[1]
             if k <= 0:
-                raise Refused("0x%x reads or writes above its entry's stack pointer (stack arguments)" % a)
-            whole = f.width == 4 and not f.cond
-            if whole and self._left_out(k):
-                return None                 # a save or a restore of a word left out (saves_out)
-            address = "(sp0 - %d)" % k
-            wb = None
+                if not self.ctx.get("wrapped"):
+                    raise Refused("0x%x reads or writes above its entry's stack pointer (stack arguments)" % a)
+                address = "(sp0 + %d)" % -k  # a stack argument, where the caller left it (render's wrapper)
+                wb = None
+            else:
+                whole = f.width == 4 and not f.cond
+                if whole and self._left_out(k):
+                    return None             # a save or a restore of a word left out (saves_out)
+                address = "(sp0 - %d)" % k
+                wb = None
         else:
             b = self.src(base)
             writable = base[0] == "r" and base[1] < 61
@@ -1363,16 +1408,35 @@ class ArcLifter(lift.Lifter):
             lines.append("extern %s %s(%s);" % ("u64" if wide else "u32", name, ", ".join(["u32"] * len(ARGS))))
         if ctx.get("helpers"):
             lines.append(HELPERS)
+        body_init = ["blink = (u32)__builtin_return_address(0)" if r == "blink" else
+                     "%s = p%d" % (r, ARGS.index(r)) if r in ARGS else "%s = 0" % r for r in VARS]
+        params = ", ".join("u32 p%d" % i for i in range(len(ARGS)))
+        result = "u64" if self._wide(fn.name) else "u32"
         if ctx.get("handler"):              # GCC writes the entry and j.f [ilink1]
             lines.append('void __attribute__((interrupt("%s"))) %s(void)' % (ctx["handler"], fn.name))
             lines.append("{")
             init = ["%s = 0" % r for r in VARS]
-        else:
-            params = ["u32 p%d" % i for i in range(len(ARGS))]
-            lines.append("%s %s(%s)" % ("u64" if self._wide(fn.name) else "u32", fn.name, ", ".join(params)))
+        elif ctx.get("wrapped"):
+            # the original's frame on the real stack, below its stack pointer at the entry (sp0), the
+            # stack arguments above it as they lie: the naked entry reserves the frame and 8 bytes of
+            # its own, and calls the body with sp0 as its ninth argument (the first word on the stack).
+            # It changes only r12 and blink before the body runs (the argument registers pass through).
+            body_name = fn.name + "_dread_body"
+            frame = (ctx["frame"] + 3) & ~3
+            lines.append("%s %s(%s, u32 sp0);" % (result, body_name, params))
+            lines.append("__attribute__((naked)) void %s(void)" % fn.name)
             lines.append("{")
-            init = ["blink = (u32)__builtin_return_address(0)" if r == "blink" else
-                    "%s = p%d" % (r, ARGS.index(r)) if r in ARGS else "%s = 0" % r for r in VARS]
+            lines.append('    __asm__ volatile ("mov r12, sp\\n\\tsub sp, sp, %d\\n\\tst.a blink, [sp, -4]\\n\\t'
+                         'st.a r12, [sp, -4]\\n\\tbl %s\\n\\tadd sp, sp, 4\\n\\tld.ab blink, [sp, 4]\\n\\t'
+                         'add sp, sp, %d\\n\\tj [blink]");' % (frame, body_name, frame))
+            lines.append("}")
+            lines.append("__attribute__((noinline, used)) %s %s(%s, u32 sp0)" % (result, body_name, params))
+            lines.append("{")
+            init = body_init
+        else:
+            lines.append("%s %s(%s)" % (result, fn.name, params))
+            lines.append("{")
+            init = body_init
         lines.append("    u32 %s;" % ", ".join(init))
         lines.append("    u32 z = 0, n = 0, c = 0, v = 0, dc = 0;")
         if ctx.get("status_word"):          # STATUS32's low bits (H, E1, E2), 0 at a case's entry
@@ -1381,10 +1445,11 @@ class ArcLifter(lift.Lifter):
         if ctx.get("flags_in"):             # read before written: the caller's flags, from STATUS32
             lines.append('    { u32 t; __asm__ volatile ("lr %0,[status32]" : "=r"(t)); z = t >> 11 & 1; '
                          'n = t >> 10 & 1; c = t >> 9 & 1; v = t >> 8 & 1; }')
-        frame = (ctx["frame"] + 3) & ~3
-        k = (frame - ctx["out"]) // 4 if ctx["out"] < frame else 0
-        lines.append("    u32 frame[%d] __attribute__((aligned(4)));" % max(1, k))
-        lines.append("    u32 sp0 = (u32)&frame[%d]%s;" % (k, " + %d" % ctx["out"] if ctx["out"] else ""))
+        if not ctx.get("wrapped"):          # a wrapped frame is the real stack, sp0 the body's argument
+            frame = (ctx["frame"] + 3) & ~3
+            k = (frame - ctx["out"]) // 4 if ctx["out"] < frame else 0
+            lines.append("    u32 frame[%d] __attribute__((aligned(4)));" % max(1, k))
+            lines.append("    u32 sp0 = (u32)&frame[%d]%s;" % (k, " + %d" % ctx["out"] if ctx["out"] else ""))
         if ctx["switch"]:
             lines.append("    u32 index = 0;")
         lines.append("    %s (void)z; (void)n; (void)c; (void)v; (void)dc; (void)sp0;%s"
