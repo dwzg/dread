@@ -260,13 +260,14 @@ class Msp430:
     word = 2
     reg_bits = 16
 
-    def vector_entries(self, read_word, vectors):
+    def vector_entries(self, read, vectors):
         """[(index, address, "reset" or "handler")] of the vector table at `vectors` (16 words below
-        0x10000, the reset vector last); unprogrammed words (0xffff, 0) are left out. read_word(address)
-        gives a word or None where nothing is loaded."""
+        0x10000, the reset vector last); unprogrammed words (0xffff, 0) are left out. read(address, n)
+        gives the bytes loaded there (fewer, or none, where nothing is; dread.discover)."""
         out = []
         for i in range(16):
-            word = read_word(vectors + 2 * i)
+            data = read(vectors + 2 * i, 2)
+            word = int.from_bytes(data, "little") if len(data) == 2 else None
             if word is None or word in (0, 0xFFFF):
                 continue
             out.append((i, word & ~1, "reset" if i == 15 else "handler"))

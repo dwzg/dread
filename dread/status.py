@@ -49,6 +49,7 @@ ARCHES = [
     ("MSP430", ("msp430",), ("msp430",), ("section", "MSP430"), None),
     ("x86, 32-bit (i386)", ("i386", "i386clang"), ("ia32",), ("item", r"\*\*x86 and x86-64"), None),
     ("MIPS32", ("mips",), (), ("item", r"MIPS32"), None),
+    ("ARC (ARCompact, ARC600)", ("arc",), (), ("section", "ARC"), None),
     ("AArch64", (), (), ("item", r"AArch64"), None),
     ("PowerPC 32", (), (), ("item", r"PowerPC 32"), None),
     ("ARM big-endian (BE-8)", (), (), ("item", r"Big-endian ARM"), None),

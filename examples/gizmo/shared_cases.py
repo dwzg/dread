@@ -12,9 +12,11 @@ def memory(*items):
     return setup
 
 
-# clamp: every side of both comparisons, the boundaries, signed extremes, an empty range
+# clamp: every side of both comparisons, the boundaries, signed extremes, an empty range (below it
+# and at its low end: x == lo > hi tells x < lo from x <= lo, which ARC's GCC computes with min, no
+# branch the generator's compare-guided answers see)
 for x, lo, hi in [(5, 0, 9), (-1, 0, 9), (0, 0, 9), (9, 0, 9), (10, 0, 9), (-2**31, -5, 5),
-                  (2**31 - 1, -5, 5), (3, 7, 2), (-7, -9, -8), (-9, -9, -8), (-8, -9, -8)]:
+                  (2**31 - 1, -5, 5), (3, 7, 2), (7, 7, 2), (-7, -9, -8), (-9, -9, -8), (-8, -9, -8)]:
     case("clamp", "%d in [%d, %d]" % (x, lo, hi), memory(), x & 0xFFFFFFFF, lo & 0xFFFFFFFF, hi & 0xFFFFFFFF)
 
 # checksum: every length up to past the unrolled loop's step, and long buffers with high bytes

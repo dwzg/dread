@@ -48,7 +48,22 @@ class Msp430Program:
         return Msp430Engine()
 
 
-PROGRAMS = {"unicorn-arm": ArmProgram, "msp430": Msp430Program}
+class ArcProgram:
+    """mov r0,1; mov r1,2; st r1,[r2]; ld r3,[r2]; b +8; mov r4,4; mov r5,5; mov r6,6 (arc-elf32-as)"""
+    code = bytes.fromhex("4a2040004a218000001a400000120300090000004a2400014a2540014a268001")
+    at = [CODE + 4 * i for i in range(8)]
+    end = CODE + 32
+    regs = {"a": 0, "b": 1, "ptr": 2, "loaded": 3, "skipped": 4, "x": 5, "y": 6, "pc": 64}
+    blocks = [(CODE, 20), (CODE + 24, 8)]
+    size = 4
+
+    @staticmethod
+    def engine():
+        from dread.engines.arc import ArcEngine
+        return ArcEngine()
+
+
+PROGRAMS = {"unicorn-arm": ArmProgram, "msp430": Msp430Program, "arc": ArcProgram}
 
 
 @pytest.fixture(params=sorted(PROGRAMS))

@@ -1,0 +1,8 @@
+# Instructions written as raw bytes because the assembler encodes them differently from
+# the original bytes (stored addresses). Maintained by `dread asm --verify`.
+0x5e0
+0x5e6
+0x5ee
+0x942
+0x94a
+0x9e8

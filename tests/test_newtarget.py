@@ -14,7 +14,7 @@ from dread import newtarget
 from dread.program import read_functions
 from dread.target import Target
 
-BUILDS = ("a32", "m3", "m4", "rv32", "msp430", "mips", "m3cpp", "rv32cpp")
+BUILDS = ("a32", "m3", "m4", "rv32", "msp430", "mips", "m3cpp", "rv32cpp", "arc")
 ARCH_KEYS = ("name", "isa", "profile", "cpu", "extensions")
 
 
@@ -262,3 +262,20 @@ def test_an_elf_without_symbols(tmp_path, monkeypatch):
     import dread.ghidra
     monkeypatch.setattr(dread.ghidra, "find_ghidra", lambda target=None: "/somewhere/ghidra")
     assert newtarget.first_analyses(made)[0]["command"] == "ghidra"
+
+
+def test_an_arc_raw_image_takes_its_entry_from_the_reset_vector(tmp_path):
+    """An ARC600 image at 0 starts with its interrupt vectors, each a j limm: the reset vector's
+    destination is the entry."""
+    raw = os.path.join(GIZMO, "arc", "original", "gizmo.bin")
+    made = newtarget.make(str(tmp_path / "raw"), raw, arch="arc600", base=0, out=quiet)
+    example = Target.load(os.path.join(GIZMO, "arc"))
+    assert made.image().entry == example.image().entry == 0x100
+    assert made.arch_data == {"name": "arc", "isa": "arc600"}
+
+
+def test_an_arc_raw_images_functions_come_from_dread_discover(tmp_path):
+    raw = os.path.join(GIZMO, "arc", "original", "gizmo.bin")
+    made = newtarget.make(str(tmp_path / "raw"), raw, arch="arc600", base=0, out=quiet)
+    steps = newtarget.first_analyses(made)
+    assert steps[0]["command"] == "discover"

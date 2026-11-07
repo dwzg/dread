@@ -144,8 +144,11 @@ def directives(target, image, symbols=True, options=()):
             out.append("entry 0x%x" % handlers[0][1])
         for _, address in handlers[1:]:
             out.append("func 0x%x -" % address)
-    elif entries is not None and image.vectors is not None:     # a vector table the layer reads (MSP430)
-        table = entries(lambda a: loaded_word(image, a), image.vectors)
+    elif entries is not None and image.vectors is not None:     # a vector table the layer reads (MSP430, ARC)
+        def read(a, n):                     # (the layer reads bytes: an ARC vector is a j limm)
+            word = loaded_word(image, a, n)
+            return b"" if word is None else word.to_bytes(n, "little")
+        table = entries(read, image.vectors)
         for _, address, kind in table:
             out.append(("entry 0x%x" if kind == "reset" else "func 0x%x -") % address)
         if not any(kind == "reset" for _, _, kind in table):

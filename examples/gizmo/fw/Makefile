@@ -1,10 +1,14 @@
 # Builds the gizmo images from the same sources and refreshes their target directories (../a32,
-# ../m3, ../m4, ../rv32, ../msp430): the ELF (ground truth for the tests), the raw image, the tables
-# made from the ELF by `dread import-elf` and the startup list in each dread.toml. a32, m3 and m4
+# ../m3, ../m4, ../rv32, ../msp430, ../arc and the others below): the ELF (ground truth for the
+# tests), the raw image, the tables made from the ELF by `dread import-elf` and the startup list in
+# each dread.toml. a32, m3 and m4
 # (hard float on FPv4-SP, with dsp.c) are built with arm-none-eabi-gcc, m3cpp too with shapes.cpp (g++);
 # rv32cpp is rv32 with shapes.cpp (clang++), rv32 with clang and ld.lld, i386 with the host's GCC (-m32) and
 # i386clang with clang (i686-unknown-elf, ld.lld), msp430 with TI's MSP430 GCC (msp430-elf-,
-# release 8.2.0.52: the 16-bit instruction set, libgcc's multiply and divide helpers). The clang
+# release 8.2.0.52: the 16-bit instruction set, libgcc's multiply and divide helpers), arc with
+# Synopsys' ARC GNU toolchain (arc-elf32-, 2026.03, GCC 15.2) for a plain ARC600 (-mcpu=arc600: the
+# barrel shifter, no multiplier, no norm or swap; libgcc's arc600 multilib multiplies and divides,
+# its divide with a zero-overhead loop). The clang
 # build of the MSP430 (build/msp430clang, its own helpers in msp430_rt.c) is not a target yet. The built files are committed, so that the tests do not depend on
 # the compiler version; run `make targets` after changing a source and commit what changes.
 CROSS ?= arm-none-eabi-
@@ -30,13 +34,16 @@ I386CLANG := --target=i686-unknown-elf -march=i686 -mno-x87 -mno-mmx -mno-sse -f
 LIBGCC32 = $(shell $(HOSTCC) -m32 -print-libgcc-file-name)
 MSP430_CROSS ?= msp430-elf-
 MSP430 := -mcpu=msp430 -mhwmult=none -DGIZMO_MSP430
+ARC_CROSS ?= arc-elf32-
+ARC := -mcpu=arc600 -DGIZMO_ARC
 MSP430CLANG := --target=msp430 -DGIZMO_MSP430
 MSP430CLANG_OBJ := $(patsubst %,build/msp430clang/%.o,start_msp430 lib util hw main msp430_rt)
 SRC := lib.c util.c hw.c main.c
 
 .PHONY: all targets clean
 all: build/a32/gizmo.elf build/m3/gizmo.elf build/m4/gizmo.elf build/m3cpp/gizmo.elf build/rv32/gizmo.elf \
-     build/rv32cpp/gizmo.elf build/mips/gizmo.elf build/msp430/gizmo.elf build/i386/gizmo.elf build/i386clang/gizmo.elf
+     build/rv32cpp/gizmo.elf build/mips/gizmo.elf build/msp430/gizmo.elf build/i386/gizmo.elf build/i386clang/gizmo.elf \
+     build/arc/gizmo.elf
 
 build/a32/gizmo.elf: start_a32.S $(SRC) a32.ld gizmo.h Makefile
 	mkdir -p $(dir $@)
@@ -106,6 +113,10 @@ build/msp430/gizmo.elf: start_msp430.S $(SRC) msp430.ld gizmo.h Makefile
 	$(MSP430_CROSS)gcc $(MSP430) $(COMMON) -T msp430.ld -Wl,-Map=$(@:.elf=.map) -o $@ start_msp430.S $(SRC) \
 	    -lgcc -lmul_none -lgcc
 
+build/arc/gizmo.elf: start_arc.S $(SRC) arc.ld gizmo.h Makefile
+	mkdir -p $(dir $@)
+	$(ARC_CROSS)gcc $(ARC) $(COMMON) -T arc.ld $(LDFLAGS) -Wl,-Map=$(@:.elf=.map) -o $@ start_arc.S $(SRC) -lgcc
+
 # The clang build (clang's MSP430 driver links with GNU's msp430-elf-ld only: compile with clang,
 # link with ld.lld)
 build/msp430clang/%.o: %.c gizmo.h Makefile
@@ -120,7 +131,7 @@ build/msp430clang/gizmo.elf: $(MSP430CLANG_OBJ) msp430.ld
 	ld.lld -m msp430elf -T msp430.ld -Map=$(@:.elf=.map) -o $@ $(MSP430CLANG_OBJ)
 
 targets: all
-	for v in a32 m3 m4 m3cpp rv32 rv32cpp mips msp430 i386 i386clang; do \
+	for v in a32 m3 m4 m3cpp rv32 rv32cpp mips msp430 i386 i386clang arc; do \
 	    mkdir -p ../$$v/original && cp build/$$v/gizmo.elf ../$$v/original/gizmo.elf && \
 	    $(DREAD) import-elf build/$$v/gizmo.elf --target ../$$v --payload ../$$v/original/gizmo.bin --write-startup && \
 	    mkdir -p ../$$v/src && python3 addresses.py build/$$v/gizmo.elf ../$$v/src/addresses.h $$v || exit 1; \

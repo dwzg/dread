@@ -4,8 +4,9 @@
 # 2.35.1): DREAD meets older compilers than the host's (2026-10-20: two gaps only GCC 13 showed, a
 # default only binutils 2.39 knows). Newlib for the relink test; the RISC-V GCC (Ubuntu's
 # riscv64-unknown-elf-, without a C library) for the tests that compile RV32 with GCC (conftest's
-# riscv_gcc: either name, the -march each version takes). Ghidra tests are skipped (no Ghidra on
-# the runner); -rs lists every skip with its reason.
+# riscv_gcc: either name, the -march each version takes); Synopsys' prebuilt ARC toolchain for
+# gizmo-arc (cached). Ghidra tests are skipped (no Ghidra on the runner); -rs lists every skip with
+# its reason.
 name: tests
 on:
   push:
@@ -61,6 +62,40 @@ jobs:
           arm-none-eabi-gcc --version | head -1
           riscv64-unknown-elf-gcc --version | head -1
           clang --version | head -1
+      - name: ARC toolchain
+        # Synopsys' prebuilt ARC GNU toolchain (GCC 15.2, binutils, newlib; docs/decisions.md, "ARC
+        # toolchain and the engine's check") for the ARC tests that assemble or compile (gizmo-arc's
+        # listing, its rewritten functions, the system run, the engine against the host's C); they
+        # skip without it. Cached by release; the archive's sha256 is checked. Put on PATH only where
+        # its GCC runs on the runner.
+        uses: actions/cache@v4
+        with:
+          path: ~/arc
+          key: arc-gnu-2026.03-elf32-le-arc600
+      - name: ARC toolchain on PATH
+        timeout-minutes: 15
+        run: |
+          if [ ! -x ~/arc/gnu-2026.03/bin/arc-elf32-gcc ]; then
+            mkdir -p ~/arc/dl
+            url=https://github.com/foss-for-synopsys-dwc-arc-processors/toolchain/releases/download/arc-2026.03-release/arc_gnu_2026.03_prebuilt_elf32_le_linux_install.tar.xz
+            curl -fsSL --retry 3 -o ~/arc/dl/arc.tar.xz "$url"
+            echo "2a23341f1060dd102a064099da3cd4af0af20fd3823f92ac0b4e28e670329d8d  $HOME/arc/dl/arc.tar.xz" | sha256sum -c -
+            tar -xJf ~/arc/dl/arc.tar.xz -C ~/arc
+            mv ~/arc/arc_gnu_prebuilt_elf32_le_linux_install/arc-multilib-elf32 ~/arc/gnu-2026.03
+            rm -rf ~/arc/dl ~/arc/arc_gnu_prebuilt_elf32_le_linux_install
+            # 2.2 GB unpacked, 170 MB without newlib and the other cores' libgcc (gizmo-arc and the tests
+            # link -nostdlib with the ARC600's libgcc only)
+            rm -rf ~/arc/gnu-2026.03/newlib-nano ~/arc/gnu-2026.03/arc-snps-elf/lib ~/arc/gnu-2026.03/share
+            for d in ~/arc/gnu-2026.03/lib/gcc/arc-snps-elf/15.2.0/*/; do
+              case "$(basename "$d")" in arc600|include|include-fixed|install-tools) ;; *) rm -rf "$d" ;; esac
+            done
+          fi
+          if ~/arc/gnu-2026.03/bin/arc-elf32-gcc --version > arc-gcc-version.txt 2>&1; then
+            head -1 arc-gcc-version.txt
+            echo "$HOME/arc/gnu-2026.03/bin" >> "$GITHUB_PATH"
+          else
+            echo "::warning::the ARC toolchain does not run here; its tests skip"
+          fi
       - name: Install
         run: |
           python -m venv .venv

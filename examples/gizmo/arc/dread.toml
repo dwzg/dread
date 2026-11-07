@@ -1,0 +1,78 @@
+# Gizmo 1000, ARC600 build: DREAD's test firmware (examples/gizmo/fw), built with Synopsys' ARC GNU
+# toolchain (arc-elf32-, 2026.03, GCC 15.2) for a plain little-endian ARC600 in ARCompact (no
+# multiplier: libgcc multiplies and divides). Not a real device. The tables in config/ come from the
+# ELF (`make -C ../fw targets`).
+
+[target]
+name = "gizmo-arc"
+title = "Gizmo 1000 (ARC600)"
+
+[arch]
+name = "arc"
+isa = "arc600"
+
+[image.main]
+original = "original/gizmo.bin"
+base = 0x0
+limit = 0x20000                 # 128 KiB of flash from the base
+entry = "_start"
+vectors = 0x0                   # the interrupt vector base's reset value: 8 bytes per vector, j limm
+fixed = {gp = 0x10004c}         # __SDATA_BEGIN__: GCC addresses small data (-G 4) from gp
+startup = [
+    {kind = "code", run = 0x100000, size = 0x30, stored = 0xc80},
+    {kind = "data", run = 0x100030, size = 0x1c, stored = 0xcb0},
+    {kind = "zero", run = 0x10004c, size = 0x2c},
+]
+
+[memory]
+regions = [
+    {name = "flash", base = 0x0, size = 0x80000, kind = "rom"},
+    {name = "ram", base = 0x00100000, size = 0x10000},
+    {name = "scratch", base = 0x00200000, size = 0x20000},
+]
+io = [[0x80000000, 0x80010000]]
+stack = {top = 0x00110000, size = 0x2000}
+sentinel = 0x0fff0000
+scratch = {base = 0x00200000, size = 0x20000}
+
+[compiler]
+cross = "arc-elf32-"
+cflags = ["-mcpu=arc600", "-Os", "-ffreestanding", "-fno-builtin", "-ffunction-sections", "-fno-common"]
+
+# Devices for the system run (dread sysrun): gizmo's serial port (examples/gizmo/fw/gizmo.h, the A32
+# build's addresses). The interrupt controller's line reaches the core on every interrupt vector
+# (3-31, start_arc.S); the system run takes its line 0 as vector 3 (the ARC layer's FIRST_LINE).
+[models.uart]
+kind = "uart"
+base = 0x80000000
+data = 0x0
+status = 0x4
+tx_ready = 0x1
+rx_ready = 0x2
+
+[models.timer]
+kind = "timer"
+base = 0x80001000
+irq = 0
+
+[models.intc]
+kind = "intc"
+base = 0x80002000
+
+[models.gpio]
+kind = "gpio"
+base = 0x80003000
+
+[scenarios.boot]
+until = {uart = "READY"}
+limit = 5_000_000
+
+[scenarios.keys]
+input = [[40_000, "uart", "s"]]
+until = {uart = "READY\r\nmode run volume 7"}
+limit = 5_000_000
+
+[scenarios.config]
+input = [[40_000, "uart", "cvolume=3\r\n"], [200_000, "uart", "s"]]
+until = {uart = "mode run volume 3"}
+limit = 5_000_000

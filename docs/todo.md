@@ -7261,27 +7261,75 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 ## ARC (ARCompact, ARC600) (the user, 2026-11-07)
 
 A new architecture: ARCompact, a 16-/32-bit little-endian ISA that neither capstone nor Unicorn
-knows, so the layer decodes it itself and will run it on an engine of DREAD's own, as the MSP430's
+knows, so the layer decodes it itself and runs it on an engine of DREAD's own, as the MSP430's
 does. The order follows docs/porting.md. The decoder's facts are checked against binutils'
-`arc-elf32-as`/`objdump` (the decision in docs/decisions.md).
+`arc-elf32-objdump`; the toolchain is Synopsys' prebuilt ARC GNU toolchain (docs/decisions.md, "ARC
+toolchain and the engine's check").
 
-- [x] **Decoding and flow.** `dread/arch/arc.py`: the register model, the instruction length
-  (16- or 32-bit, with a 32-bit long immediate where an operand field is the code 0x3e -- including
-  the 16-bit h-register forms and the destination forms, mov/nop, that look like one but are not),
-  and the control flow (B/Bcc with their targets, BL/BR, the register jumps j/jl and returns through
-  blink). Registered in `dread/arch/__init__.py`. Done 2026-11-07 with a test on ground truth from
-  the assembler (tests/test_arch_arc.py); the length decoder was checked against a whole 192 KB ARC
-  image's objdump disassembly, agreeing on every instruction (the few left are data the linear
-  disassembly reads as code). Not yet: 16-bit control-flow targets (j_s/b_s), the LD reg+reg limm,
-  and the operand text.
-- [ ] **A gizmo ARC build.** An ARC GCC (prebuilt or built), a start file and linker script for the
-  core, the Makefile rules and a target directory with its `dread.toml`; `dread import-elf`,
-  `dread functions` and `dread asm --verify` on it. (Needs the ARC GCC: a question for the user, or
-  built like the binutils were.)
-- [ ] **The operand text** (`arch.asm()` with GNU as) so `dread asm --verify` round-trips.
-- [ ] **The engine** (`dread/engines/arc.py`, a Python ARCompact interpreter behind the engine
-  contract), checked against an independent simulator; `dread test` on functions rewritten in C.
-- [ ] regflow (the calling convention), switches, noreturn; then the system run; then the lifter.
+- [x] **Decoding and flow.** `dread/arch/arc_decode.py` (fields and text) and `dread/arch/arc.py`
+  (the layer): every base ARCompact instruction with its operands in structured form (for the
+  engine) and objdump's text (for dread asm), the long immediates, the delay slots (.d), the
+  conditions, the zero-overhead loop's lp, the auxiliary registers by name. Done 2026-11-07: the
+  decoder agrees with objdump on every 16-bit word, on 180,000 random 32-bit words and on every
+  instruction of a private ARC600 firmware image's linear disassembly; tests/data/arc_objdump.tsv
+  keeps 5,000 of objdump's answers for the suite (tests/arc_vectors.py writes it), and a fresh random
+  set is compared where objdump is installed. The first step's length decoder (2026-11-07 morning)
+  took majors 0x08-0x0b for 16-bit; they are 32-bit (extension space). Not decoded: major 0x05's
+  DSP and XMAC operations beyond their names, majors 0x06-0x0b, the extension conditions' meanings.
+- [x] **A gizmo ARC build.** `examples/gizmo/fw/start_arc.S`, `arc.ld`, the Makefile's rule (GCC
+  15.2, -mcpu=arc600: barrel shifter, no multiplier) and `examples/gizmo/arc`. Done 2026-11-07:
+  `dread import-elf`, `dread functions`, and `dread asm --verify`, whose listing rebuilds the image
+  byte for byte in one pass (857 instructions, 6 raw: padding and two switch tables' bytes).
+- [x] **The operand text** (`ArcAsm`: objdump's text, which GNU as reads back; branches to labels).
+  Done with the decoder.
+- [x] **The engine** (`dread/engines/arc.py`: sparse 32-bit memory, instructions compiled to Python
+  functions, delay slots and the loop's back edge in the run loop). Done 2026-11-07: the engine
+  contract (tests/test_engines.py), assembled snippets (tests/test_engine_arc.py), and 27 C functions
+  compiled for the ARC600 at -Os, -O2 and -O0 (libgcc's multiply and divide with their zero-overhead
+  loop, 64-bit arithmetic, switch tables, sign extension, calls through pointers) computing on the
+  engine what they compute on the host. That check found sbc adding its carry. No independent
+  ARCompact simulator was found to check against (the decision). `dread test` on gizmo-arc's 13
+  rewritten functions: all agree with generated cases, two moved by the overlay.
+- [ ] **regflow, switches, noreturn.** Switches: bound_check done (brhs/brlo, cmp, bmsk, and), the
+  dispatch runs on the engine; handle_key's and script_run's tables resolve. Left: regflow's bit
+  rules (bit_demand, store_demand) and value_step, noreturn on ARC, branch_deciders for the
+  generator's compare-guided answers, the zero-overhead loop's back edge in regflow and the lifter
+  (`loop_body`).
+- [ ] **The mutation check** (`dread mutate`) on gizmo-arc's rewritten functions.
+- [x] **The system run**: reset at vector 0's j limm, interrupt entry (ilink1 and STATUS32_L1 for
+  level 1, ilink2 and _L2 for a line AUX_IRQ_LEV makes level 2; E1, and for level 2 E2, cleared), j.f
+  return (in the engine), libgcc's helpers without time (runtime_helper). Done 2026-11-07: gizmo-arc's
+  three scenarios agree, original against rebuilt, at the same clock (tests/test_arch_arc.py). A
+  controller's line N is vector 3 + N (docs/decisions.md); a run that ends between a .d branch and
+  its slot goes on behind the slot (the engine keeps the branch). Not confirmed on a core: the
+  entry's details (the L bit, AUX_IRQ_LV12), level 2 (gizmo has none).
+- [ ] **The lifter** (`dread/lift_arc.py`) and its fuzzer, then readable C.
+- [x] **`dread new` for ARC**: an ELF of machine 93 (EM_ARC_COMPACT; tests/test_newtarget.py's
+  BUILDS), and a raw image with `--arch arc600` (the entry from the reset vector's j limm). Done
+  2026-11-07; gp from __SDATA_BEGIN__ (the layer's fixed_from_symbols).
+- [x] **Function tables without Ghidra** (`dread discover`): Ghidra has no ARCompact processor (the
+  installation here, 11.x), so a raw ARC image had no way to its tables. Done 2026-11-07: the code
+  followed from the entry, the vectors (the layer's vector_entries) and the calls; tail calls and
+  shared code made functions; switches resolved by dread.switches in rounds; functions behind
+  pointers (immediates, words outside the code) and in the gaps between functions taken where every
+  path decodes and ends as code ends (a return, or a jump to an entry; no zero words). On gizmo-arc's
+  raw image it finds exactly the ELF's 54 functions; on a private ARC600 firmware image the
+  listing of what it finds rebuilds byte for byte. The map of covered bytes is kept as instructions
+  are found (a first version rebuilt it for every candidate). Not
+  confirmed: how many of the pointer and gap functions on a large image are data (no ground truth
+  there); other architectures (it is generic, but tried on ARC only).
+- [x] **CI**: the ARC tests skipped without the toolchain, which CI did not have. Done 2026-11-07:
+  the workflow downloads Synopsys' prebuilt toolchain (its sha256 checked), keeps what the ARC600
+  needs (170 MB of 2.2 GB) in the runner's cache and puts it on PATH where its GCC runs. Not
+  confirmed until CI's first run: that the prebuilt runs on Ubuntu 22.04's glibc.
+- [ ] **dread discover: out-of-line blocks.** A block a function jumps to outside its own span
+  becomes a function (the rule that makes tail calls' callees functions). Another compiler's code
+  (a private ARC600 firmware's) places blocks of one function so: such a "function" reads its
+  parent's callee-saved registers as pointers, and its generated cases fault. Tell them apart (a
+  target that reads callee-saved registers before writing them, or the parent's frame, is the
+  parent's block), or join them to their parent where the extent allows.
+- [x] **dread discover: vector tables of fewer slots.** Done for ARC (2026-11-07: the table ends at
+  the first slot that is no j limm; a private ARC600 image has fewer than 32 and code behind them).
 
 ## Known gaps (not scheduled)
 

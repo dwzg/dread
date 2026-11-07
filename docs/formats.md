@@ -29,8 +29,10 @@ walk. Entry plus size is **not** the end of a function with pools inside.
 
 Code the startup copies to RAM is listed at its **run** address.
 
-Written by the Ghidra pipeline (`dread ghidra`) or by `dread import-elf`. Not edited by hand. Two
-details of the writers:
+Written by the Ghidra pipeline (`dread ghidra`), by `dread import-elf`, or by `dread discover`
+(from 2026-11-07: an image without an ELF or Ghidra; its `bytes` count the instructions only, a
+switch table inside a function is not counted, where `dread import-elf` counts what the symbol's size
+covers). Not edited by hand. Two details of the writers:
 
 - `dread ghidra` names a thunk Ghidra shows under its target's name `thunk_NAME`, so that names stay
   unique; a name that is still taken (two thunks of one function) gets the function's address,
@@ -52,8 +54,8 @@ The instruction runs of the image: `start`, `end` (exclusive), and optionally th
 addresses, like the function table.
 
 In Thumb code, instruction boundaries are found by walking a run from its start, so a run must
-start at an instruction. Written by the Ghidra pipeline (always with the instruction set) or by
-`dread import-elf`. Ghidra's heuristics sometimes take data for code, for instance a string behind a
+start at an instruction. Written by the Ghidra pipeline (always with the instruction set), by
+`dread import-elf`, or by `dread discover` (always with the instruction set). Ghidra's heuristics sometimes take data for code, for instance a string behind a
 pointer that a register carries. The listing still rebuilds, but such ranges are worth a look before
 functions are written there.
 

@@ -9,6 +9,49 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## ARC: which vector an interrupt controller's line enters (2026-11-07)
+
+**Decided by recommendation**, for the system run on ARC (docs/todo.md "ARC").
+
+- **Question.** DREAD's interrupt controller models name their lines from 0; an ARC600's vectors 0-2
+  are reset and the two error exceptions, its interrupt lines 3-31. Which vector does line N enter?
+- **Options.** (a) Vector 3 + N (line 0 the first interrupt vector); (b) vector N, as the MSP430's
+  layer does (line 0 would be reset); (c) a key in [models.*] naming the vector.
+- **Choice.** (a), the layer's FIRST_LINE; a controller that knows the core's vectors gives them as
+  its core_cause, which the layer takes as the vector itself (a model of a real chip's interrupt
+  aggregator does so).
+- **How to undo.** Change Arc.FIRST_LINE, or give a controller core_cause.
+- **Status.** In the code; gizmo-arc's scenarios run with it.
+
+## ARC toolchain and the engine's check (2026-11-07)
+
+**Decided by recommendation**, continuing the ARC work the user asked for (docs/todo.md "ARC").
+
+- **Question 1.** Which ARC toolchain builds gizmo-arc and gives the tests their ground truth? The
+  binutils built in the morning's session were on another machine; this one had none.
+- **Options.** (a) Synopsys' prebuilt ARC GNU toolchain (github.com/foss-for-synopsys-dwc-arc-processors/
+  toolchain, release arc-2026.03: GCC 15.2, binutils, newlib, with ARC600 multilibs); (b) build GNU
+  binutils and GCC for arc-elf32 from source; (c) crosstool-NG.
+- **Choice.** (a), unpacked under the user's home (`~/arc/gnu-2026.03`, not on PATH, not in this
+  repository; the release archive's sha256 is
+  2a23341f1060dd102a064099da3cd4af0af20fd3823f92ac0b4e28e670329d8d). Its GCC is the one ARC users
+  have, it needs no build, and objdump comes with it. The tests look for `arc-elf32-*` on PATH and skip without them.
+- **Question 2.** What is the ARC engine checked against? docs/porting.md asks for an independent
+  simulator, as GDB's is for the MSP430.
+- **Options.** (a) An independent ARCompact simulator: none found that runs here (QEMU upstream has
+  no ARC; Synopsys' QEMU fork targets ARCv2 and ARCv3, not ARCompact, as far as we know; nSIM is
+  Synopsys' and not free software; GDB has no ARC simulator); (b) C compiled for the ARC600 run on the
+  engine and on the host, results compared; (c) both, once (a) exists.
+- **Choice.** (b) now: it checks what compiled code relies on (flags, carries, delay slots, the
+  zero-overhead loop, libgcc), and found a bug at once (sbc added its carry). It does not check
+  instructions GCC never emits (the DSP extensions, which the engine refuses) or flag details GCC
+  does not use (max/min's and the barrel shifter's flags are marked not confirmed in the engine's
+  docstring).
+- **How to undo.** (1) Point PATH at another arc-elf32 toolchain; the committed gizmo-arc ELF does not
+  change with it. (2) Add a simulator comparison beside tests/test_engine_arc.py when one is found.
+- **Status.** In the code. CI does not have the toolchain yet: its ARC tests that need it skip there
+  (docs/todo.md "ARC", the CI item).
+
 ## ARC (ARCompact) decoder and its toolchain (2026-11-07)
 
 **Decided by recommendation**, starting the ARC architecture the user asked for (`dread/arch/arc.py`,
@@ -25,8 +68,8 @@ docs/todo.md "ARC (ARCompact, ARC600)").
   the reference assembler for the ARC GCC the gizmo build will use.
 - **Why.** Consistency with the existing layers and determinism (rule 5).
 - **How to undo.** Remove the `arc` branch from `dread/arch/__init__.py` and delete `dread/arch/arc.py`.
-- **Status.** In the code: decoding (instruction length with the long immediate, and control flow)
-  and its test are in; the operand text, calling convention and engine are later steps.
+- **Status.** In the code: the decoder (dread/arch/arc_decode.py, every base instruction, objdump's
+  text), the listing, the engine. The assembler is the prebuilt toolchain's (the next entry).
 
 ## Development prerequisites on a fresh machine (2026-11-07)
 

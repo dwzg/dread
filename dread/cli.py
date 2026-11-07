@@ -16,6 +16,7 @@ COMMANDS = {
     "info": ("dread.target", "show the target as DREAD reads it"),
     "import-elf": ("dread.elfimport", "an image's tables from an ELF with symbols"),
     "functions": ("dread.listfunctions", "list the functions of an image with their extents"),
+    "discover": ("dread.discover", "an image's function and code tables, found by following its code (no ELF, no Ghidra)"),
     "asm": ("dread.mkasm", "a listing that GNU as rebuilds byte for byte (--verify)"),
     "ghidra": ("dread.ghidra", "analyse an image with Ghidra and write its function and code tables"),
     "recon": ("dread.build", "compile the image's C and link it over the original"),

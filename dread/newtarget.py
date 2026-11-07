@@ -64,8 +64,9 @@ from dread import target as tgt
 from dread.elf import Elf, ElfError
 
 SHF_WRITE = 0x1
-EM_ARM, EM_MIPS, EM_MSP430, EM_RISCV = 40, 8, 105, 243
-FAMILIES = {EM_ARM: "arm", EM_RISCV: "riscv", EM_MSP430: "msp430", EM_MIPS: "mips"}
+EM_ARM, EM_MIPS, EM_MSP430, EM_RISCV, EM_ARC_COMPACT = 40, 8, 105, 243, 93
+FAMILIES = {EM_ARM: "arm", EM_RISCV: "riscv", EM_MSP430: "msp430", EM_MIPS: "mips", EM_ARC_COMPACT: "arc"}
+PRESET_OF_FAMILY = {"msp430": "msp430", "mips": "mips32", "arc": "arc600"}   # (ARM and RISC-V: from the ELF)
 COMMON_FLAGS = ["-Os", "-ffreestanding", "-fno-builtin", "-ffunction-sections", "-fno-common"]
 
 # The architectures DREAD runs, as --arch names them: [arch], GCC's flags, clang's --target, in words.
@@ -100,6 +101,9 @@ ARCHES = {
     "mips32": ({"name": "mips", "isa": "mips32"}, ["-march=mips32r2", "-mno-abicalls", "-fno-pic"],
                "mipsel-unknown-elf", "MIPS32 release 2, little endian (under way: the listing works, the "
                                      "analyses after it are not expected to)"),
+    "arc600": ({"name": "arc", "isa": "arc600"}, ["-mcpu=arc600"], None,
+               "ARCompact, ARC600, little endian (under way: the listing, dread test and the switches work; "
+               "regflow's finer rules, the system run and the lifter do not yet)"),
 }
 CPU_OF_ARCH = {11: "cortex-m0", 12: "cortex-m0", 10: "cortex-m3", 13: "cortex-m4", 16: "cortex-m33", 17: "cortex-m33",
                21: "cortex-m33"}                    # ARM's Tag_CPU_arch on an M-profile core: Unicorn's model
@@ -564,7 +568,7 @@ def elf_plan(path, arch=None, limit=None, ram=None, io=None, unnamed=False):
         raise NewTargetError("%s: %s" % (path, e))
     family = FAMILIES.get(elf.machine)
     if family is None:
-        raise NewTargetError("%s: machine %d is none of DREAD's architectures (ARM, RISC-V, MSP430, MIPS)"
+        raise NewTargetError("%s: machine %d is none of DREAD's architectures (ARM, RISC-V, MSP430, MIPS, ARC)"
                              % (path, elf.machine))
     p = Plan()
     p.elf_name = os.path.basename(path)
@@ -573,7 +577,7 @@ def elf_plan(path, arch=None, limit=None, ram=None, io=None, unnamed=False):
     elif family == "riscv":
         p.arch, p.gcc_flags, p.triple, words = riscv_arch(elf)
     else:
-        preset = ARCHES["msp430" if family == "msp430" else "mips32"]
+        preset = ARCHES[PRESET_OF_FAMILY[family]]
         p.arch, p.gcc_flags, p.triple = dict(preset[0]), list(preset[1]), preset[2]
         words = preset[3]
     if arch:
@@ -643,6 +647,8 @@ def elf_plan(path, arch=None, limit=None, ram=None, io=None, unnamed=False):
         near = lambda a: any(lo - 0x1000 <= a <= hi + 0x1000000 for lo, hi in ram_spans) or (
             writable_in_image and p.base <= a <= p.end + 0x1000000)
         top, top_from = stack_top(elf, near)
+    if family == "arc":
+        arc_vectors(p, elf.read)
     plan_memory(p, ram_spans, top, top_from, ram, io, writable_in_image)
     by_address = {s.value & ~1 if family == "arm" else s.value: s.name for s in elf.symbols
                   if s.kind == 2 and s.name and re.fullmatch(r"[A-Za-z_]\w*", s.name)}
@@ -692,6 +698,11 @@ def raw_plan(path, arch, base, entry=None, limit=None, ram=None, io=None):
                 if base <= candidate < base + len(data):
                     entry = candidate
                     p.notes["entry"] = "the reset vector at 0xfffe"
+    if p.arch["name"] == "arc":
+        reset = arc_vectors(p, read)
+        if entry is None and reset is not None:
+            entry = reset
+            p.notes["entry"] = "the reset vector's jump at 0x%x" % base
     p.entry = base if entry is None else entry
     if entry is None:
         p.notes["entry"] = "the base (guessed: give --entry)"
@@ -700,12 +711,27 @@ def raw_plan(path, arch, base, entry=None, limit=None, ram=None, io=None):
     return p
 
 
+def arc_vectors(p, read):
+    """An ARC image whose base holds the interrupt vector table (its base at 0 out of reset, each
+    vector 8 bytes, a jump with a long immediate: j limm): p.vectors = its address, and the reset
+    vector's destination (None where the base holds no such jump)."""
+    if p.base != 0:
+        return None
+    word = read(p.base, 8)
+    if not word or word[:4] != bytes.fromhex("2020800f"):
+        return None
+    p.vectors = p.base
+    target = (word[4] | word[5] << 8) << 16 | (word[6] | word[7] << 8)
+    return target if p.base <= target < p.end else None
+
+
 # ---- the compiler ----
 
 def gcc_prefix(family):
     """The prefix of this machine's GCC for an architecture, or None."""
     from dread import doctor
-    prefixes = {"arm": ("arm-none-eabi-",), "riscv": doctor.RISCV_GCC, "msp430": ("msp430-elf-",)}.get(family, ())
+    prefixes = {"arm": ("arm-none-eabi-",), "riscv": doctor.RISCV_GCC, "msp430": ("msp430-elf-",),
+                "arc": ("arc-elf32-", "arc-snps-elf-")}.get(family, ())
     return next((p for p in prefixes if shutil.which(p + "gcc")), None)
 
 
@@ -733,8 +759,8 @@ def choose_compiler(p, kind=None, cross=None):
     have = {"gcc": prefix is not None and (cross is not None or shutil.which(prefix + "gcc") is not None),
             "clang": p.triple is not None and clang_has(p.triple)}
     chosen = wanted if kind or have.get(wanted) else next((k for k in ("gcc", "clang") if have[k]), wanted)
-    if family == "msp430" and chosen == "clang":
-        chosen = "gcc"                          # (ld.lld does not link the MSP430)
+    if family in ("msp430", "arc") and chosen == "clang":
+        chosen = "gcc"                          # (ld.lld does not link the MSP430; clang has no ARCompact)
     if chosen != p.kind and p.kind is not None:
         p.notes["compiler"] = "the original was made by %s, which this machine lacks for %s" % (p.kind, family)
     if chosen == p.kind == "gcc" and p.original_flags:
@@ -752,7 +778,7 @@ def choose_compiler(p, kind=None, cross=None):
         found = have["clang"]
     else:
         prefix = prefix or {"arm": "arm-none-eabi-", "riscv": "riscv64-unknown-elf-", "msp430": "msp430-elf-",
-                            "mips": "mipsel-elf-"}[family]
+                            "mips": "mipsel-elf-", "arc": "arc-elf32-"}[family]
         if family == "riscv" and shutil.which(prefix + "gcc"):
             march = next((f for f in flags if f.startswith("-march=")), None)
             if march and "_zicsr" not in march and takes([prefix + "gcc"], [march + "_zicsr", "-mabi=ilp32"]):
@@ -976,7 +1002,8 @@ def functions_in(target, image=None):
 def first_analyses(target, image=None):
     """The first analyses of a target, in order: [{"step", "command" (None for one that is done), "values"
     (the form's values: dread.guipages.run start_command), "why"}]: the functions (from the tables where
-    there are any, else dread ghidra --no-decompile where Ghidra is found), dread regflow, dread lift
+    there are any, else dread discover for an architecture Ghidra does not take, the layer's ghidra
+    None: ARC, else dread ghidra --no-decompile where Ghidra is found), dread regflow, dread lift
     --check, dread readable --check. NewTargetError where the image has no functions and no Ghidra can
     find them."""
     from dread.ghidra import find_ghidra
@@ -985,6 +1012,10 @@ def first_analyses(target, image=None):
     if n:
         steps.append({"step": "functions", "command": None, "values": None,
                       "why": "%d functions in the tables already" % n})
+    elif getattr(target.image(image).arch, "ghidra", "") is None:
+        steps.append({"step": "functions", "command": "discover", "values": {},
+                      "why": "dread discover finds them by following the code (Ghidra does not take this "
+                             "architecture)"})
     elif find_ghidra(target):
         steps.append({"step": "functions", "command": "ghidra", "values": {"--no-decompile": True},
                       "why": "Ghidra finds them (the image has no symbols)"})

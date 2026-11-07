@@ -8,7 +8,11 @@ on it, and its port is the worked example of the order below), `dread.arch.msp43
 itself, into objects with capstone's attributes, and runs them on an engine of DREAD's own,
 `dread.engines.msp430`), `dread.arch.mips.Mips` the fourth (paused after step 1: MIPS32r2 little
 endian, the first with delay slots; it decodes the bits itself too; the branch `mips` goes on with
-Unicorn's virtual TLB, so that kseg0 and kseg1 addresses are themselves).
+Unicorn's virtual TLB, so that kseg0 and kseg1 addresses are themselves), `dread.arch.arc.Arc` the
+fifth (under way: ARCompact for the ARC600, decoded by `dread.arch.arc_decode` and run on
+`dread.engines.arc`, whose memory is sparse: the base engine's flat array holds 16 address bits;
+delay slots that run on both ways of a branch, and a zero-overhead loop whose back edge belongs to
+no instruction: `loop_body`).
 This page lists what a new layer has to provide, what is still ARM-specific outside the layer, and
 the order of the work.
 
