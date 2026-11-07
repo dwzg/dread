@@ -1273,13 +1273,15 @@ def probe_caller(name, arity=4):
 
 
 @pytest.mark.skipif(not shutil.which("cc"), reason="needs the host's C compiler (cc)")
-def test_random_it_blocks_cleaned_up_compute_the_same(tmp_path):
+@pytest.mark.parametrize("seed", range(11, 17))
+def test_random_it_blocks_cleaned_up_compute_the_same(tmp_path, seed):
     """Random functions of IT-block-like code (random_it_function), cleaned up (every pass), compiled
     with the host's C compiler beside the originals and called with random arguments: the same result
     and the same calls in the same order with the same arguments (probe's trace); and the clean-up
-    merged most of the conditional blocks."""
-    rng = random.Random(11)
-    count, originals, results, arity = 300, [], [], []
+    merged most of the conditional blocks. Six seeds of 50 functions each (until 2026-11-07 one of 300,
+    35 s, the fast suite's last test to end with 12 workers: as six they run side by side)."""
+    rng = random.Random(seed)
+    count, originals, results, arity = 50, [], [], []
     ifs_before = ifs_after = 0
     for i in range(count):
         text = random_it_function(rng, "orig_%d" % i, steps=rng.randint(4, 14))
