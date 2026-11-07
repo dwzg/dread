@@ -2155,10 +2155,13 @@ I386_NAMES = ["clamp", "checksum", "parse_uint", "fmt_hex", "sum6", "udiv_var", 
               "strcmp", "parse_kv", "uart_putc", "uart_puts", "dispatch", "script_run"]
 
 
-def test_gizmo_i386_lift_check_accepts_what_agrees_and_drops_a_mistake(tmp_path, monkeypatch):
-    """The lift check on GCC's i386 build: the lifted C of these functions agrees with the original on
-    generated cases that run every instruction; with je taken on zf clear (a planted mistake) the
-    functions that test equality are dropped."""
+# The planted mistake's check on a part of I386_NAMES: those that test equality fail, the others agree
+# (0.7 s; on all 14 the check takes about 110 s: uart_puts, parse_kv and the others' rounds of retries
+# and whole-image runs with many broken functions, which the slow test below keeps)
+PLANTED_NAMES = ["clamp", "strcmp", "parse_uint", "checksum", "print_status", "script_run", "fmt_hex"]
+
+
+def _lift_check_with_a_planted_mistake(tmp_path, monkeypatch, planted):
     if not _compiles("i386", tmp_path):
         pytest.skip("needs the host's gcc with -m32")
     from dread import build, lift, lift_x86
@@ -2172,10 +2175,26 @@ def test_gizmo_i386_lift_check_accepts_what_agrees_and_drops_a_mistake(tmp_path,
     # (the boot scenario on the image with all of them built: dread.sysrun on x86 since 2026-10-27)
     assert any("the whole image agrees" in line for line in lines), lines
     monkeypatch.setitem(lift_x86.CONDITIONS, "e", "!zf")
+    planted = [n for n in planted if n in names]
     lines = []
-    accepted = lift.check(target, image, names, out=lines.append, jobs=4)
+    accepted = lift.check(target, image, planted, out=lines.append, jobs=4)
     dropped = [line.split()[2] for line in lines if line.startswith("dropped  FAIL")]
-    assert dropped and set(accepted) | set(dropped) == set(names), lines
+    assert dropped and accepted and set(accepted) | set(dropped) == set(planted), lines
+    return dropped
+
+
+def test_gizmo_i386_lift_check_accepts_what_agrees_and_drops_a_mistake(tmp_path, monkeypatch):
+    """The lift check on GCC's i386 build: the lifted C of these functions agrees with the original on
+    generated cases that run every instruction; with je taken on zf clear (a planted mistake) the
+    functions that test equality are dropped, the others kept (on PLANTED_NAMES)."""
+    dropped = _lift_check_with_a_planted_mistake(tmp_path, monkeypatch, PLANTED_NAMES)
+    assert {"strcmp", "parse_uint", "checksum"} <= set(dropped)
+
+
+@pytest.mark.slow
+def test_gizmo_i386_lift_check_drops_a_planted_mistake_in_every_function(tmp_path, monkeypatch):
+    """As the test above, the planted mistake's check on every function of I386_NAMES."""
+    _lift_check_with_a_planted_mistake(tmp_path, monkeypatch, I386_NAMES)
 
 
 
