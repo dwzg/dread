@@ -284,7 +284,16 @@ class Program:
         return Function(name, entry, size, isa, insns)
 
     def insn_size(self, address):
-        return self.code[address][0]
+        """The size of the instruction at address: from the code ranges' decoding, or, where that
+        walk did not start one there (an ARC switch table of bytes inside the code put it out of step:
+        dread.lift_arc lifts what the flow reaches), decoded alone."""
+        c = self.code.get(address)
+        if c is None:
+            insn = self.insn(address)
+            if insn is not None:
+                return insn.size
+            raise KeyError(address)
+        return c[0]
 
     def isa_at(self, address):
         c = self.code.get(address)

@@ -33,8 +33,11 @@ def test_the_functions_of_gizmo_arc_from_its_raw_image(tmp_path):
     functions, runs, cut, left, _ = discover.discover(target, target.image())
     truth = {e: (name, size) for e, name, size in read_functions(example.image().table("functions"))}
     assert sorted(e for e, _, _ in functions) == sorted(truth)
-    assert cut == 0 and not left
+    # left: libgcc's __umodsi3 returns through a copy of blink kept in r7 across __udivmodsi4 (mov
+    # r7,blink; bl; j.d [r7]), which no run resolves; until 2026-11-07 dread.switches took the jump's
+    # delay slot for where it lands, and the jump counted as resolved
     found, elf = Program(target), Program(example)
+    assert cut == 0 and left == [elf.by_name["__umodsi3"].entry + 8]
     for fn in found.functions:
         true = elf.by_entry[fn.entry]
         end = true.insns[-1] + elf.insn_size(true.insns[-1])     # (the ELF's side decodes a table's

@@ -98,6 +98,8 @@ def _on_code(uc, address, size, state):
     if through is not None and through[0] <= address < through[1]:
         state["called"] = True              # inside the switch helper the jump called
         return
+    if address == state.get("slot") and state["last"] == state["jump"]:
+        return                              # (the delay slot of the jump: it runs before the jump goes)
     if state.get("called") or not state["lo"] <= address <= state["jump"]:
         state["landed"] = address
         uc.emu_stop()
@@ -188,6 +190,9 @@ def _run(program, uc, state, isa, runs, first, address, presets=None):
     faulted or left the run before the jump). presets: {register: value} written over the fill."""
     arch = program.arch
     landings = []
+    jump = program.insn(address)
+    delayed = getattr(arch, "delay_slot", None)     # (ARC's .d: the slot runs before the jump lands)
+    slot = address + jump.size if jump is not None and delayed is not None and delayed(jump) else None
     try:
         for fill, set_at, reg, value in runs:
             state["new"] = 0
@@ -198,7 +203,7 @@ def _run(program, uc, state, isa, runs, first, address, presets=None):
                     uc.reg_write(arch.reg_id(r), v)
                 arch.initial_status(uc)
                 state.update(set_at=set_at, reg=reg, value=value, lo=first, jump=address, landed=None, last=None,
-                             called=False, through=_helper(program, address), want=set())
+                             slot=slot, called=False, through=_helper(program, address), want=set())
                 try:
                     uc.emu_start(arch.start_address(first, isa), 0xFFFFFFFF, count=STEPS)
                     landing = state["landed"] if state["last"] == address else None

@@ -420,6 +420,11 @@ def _resolve(target, image, walk, jumps, resolved):
         fn = program.function_at(a)
         if fn is None:
             continue
+        lifter, states = switches._plain_states(program, fn)
+        insn = program.insn(a)
+        if states and a in states and insn is not None and lifter.ret_jump(insn, states[a][1]):
+            walk.through.add(a)             # a return through a copy of the return address (libgcc's
+            continue                        # __umodsi3 on ARC: mov r7,blink ... j.d [r7])
         got = switches.resolve(program, fn, a)
         if got is None:
             continue

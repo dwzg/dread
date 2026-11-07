@@ -138,6 +138,15 @@ needed on it):
   of a memory operand, and the string operations through esi and edi, read and write the frame in
   the frame analysis (saves_out had taken a word that only a push reads for a save, and words a rep
   movsd fills for untouched, and the C lost a store or ran over its own frame).
+  `dread.lift_arc` (ARCompact) needed two things none of the others has: delay slots, which the
+  analyses take in the order they run (its successors: whatever leads to a delayed branch leads to
+  its slot, the slot to the branch, the branch to its targets and behind the slot; the C evaluates
+  the condition before the slot's statement), and the zero-overhead loop, whose back edge belongs to
+  no instruction (successors adds it at the body's last instruction, the C writes `if (--lp_count)
+  goto L_start;` there). The flags are followed one by one (an ArcView of the layer with
+  flag_effects: a logical .f writes Z and N only). An ARC switch's table of byte offsets lies in the
+  code behind its jump; `dread.elfimport` cuts such tables out of the code ranges where the layer says
+  `inline_tables` (the case generator takes a load of code for a run that reads instructions).
 - `dread.elfimport`: ARM dispatch slots and padding between functions (other architectures skip
   them).
 

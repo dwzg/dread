@@ -9,6 +9,46 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## ARC lifter: delay slots, the loop's back edge, inline tables, GCC's multiplications (2026-11-07)
+
+**Decided by recommendation**, for the first ARC lifter (docs/todo.md "ARC", dread.lift_arc).
+
+- **Question 1.** How do dread.lift's shared analyses (states, the registers read before written,
+  the frame's saves) see a delayed branch, whose slot runs before the branch goes? **Options.** (a)
+  The pair in the order it runs: whatever leads to the branch leads to its slot, the slot to the
+  branch, the branch to its targets and to what follows the slot (the lifter's successors); (b) the
+  branch as one instruction with its slot's effects folded in; (c) refuse delay slots. **Choice.**
+  (a): every analysis then sees the slot's effects before the branch's (bl.d's argument, j_s.d
+  [blink]'s pop), without a second notion of an instruction. What (a) hides, that the branch's
+  condition reads registers before the slot writes them, entry_states adds back, and the C
+  evaluates the condition into dc before the slot's statement. A slot that something else reaches
+  is refused. **Undo.** ArcLifter.successors as the base's, and refuse every .d.
+- **Question 2.** The zero-overhead loop's back edge belongs to no instruction. **Choice.** The body's
+  last instruction gets it in successors and `if (--lp_count) goto L_start;` in the C; a body that
+  holds a call or another lp, is entered from outside, or ends in a branch is refused (there the
+  engine's counting and the C's would differ). **Undo.** Refuse lp.
+- **Question 3.** A switch's table of byte offsets lies in the code behind its j_s [rN] (gizmo-arc's
+  script_run and handle_key); the ELF has no mapping symbol that says so. As code the case
+  generator dropped every input that loads it (a load of an instruction), and the linear decoding
+  behind script_run's 7-byte table was out of step. **Options.** (a) dread import-elf cuts such
+  tables out of the code ranges, for a layer with inline_tables (behind an indirect jump that does
+  not fall through and resolves inside its function, up to the first address a branch from outside
+  that stretch goes to); (b) the lifter walks the flow and lifts what it reaches (it does, where the
+  decoding misses an instruction); (c) edit gizmo-arc's tables by hand. **Choice.** (a), the tables
+  then say what the bytes are, for every tool; (b) stays for an image whose tables were made
+  otherwise. **Undo.** inline_tables = False in the ARC layer, and import gizmo-arc again.
+- **Question 4.** GCC 15 for the ARC600 (no multiplier) compiles two of the lifted C's forms into
+  calls of libgcc's __mulsi3, which dread lift --check drops (foreign_calls): the final value of a
+  counted loop (lp_count's count-down), and `if (c) x += y` with c 0 or 1 as x + c * y (both in
+  __udivmodsi4, the second in conds of tests/test_lift_arc.py). **Options.** (a) An empty asm on
+  lp_count before the count-down and on the condition of each conditional instruction, which hides
+  the count and the range from GCC; (b) compiler flags for lifted C ([compiler] lifted_cflags) that
+  turn the transformations off; (c) leave such functions dropped. **Choice.** (a): it is the C's
+  own business and needs no flag a target must know; it costs a register move at most. Not
+  confirmed that no other form of GCC's turns into a multiplication: foreign_calls still drops such
+  a function. **Undo.** Leave the two asm statements out (dread.lift_arc: insn and _one).
+- **Status.** In the code; gizmo-arc's lifted table has 36 functions with it.
+
 ## ARC: which vector an interrupt controller's line enters (2026-11-07)
 
 **Decided by recommendation**, for the system run on ARC (docs/todo.md "ARC").

@@ -363,6 +363,71 @@ def free_ranges(elf, base, end=None, reserved=()):
     return out
 
 
+def inline_tables(target, image):
+    """[(start, end)] of the switch tables that lie inside the code of the image's tables as written
+    (a layer with inline_tables: GCC for ARC puts a switch's byte offsets right behind its j_s [rN],
+    and the ELF has no mapping symbol that says they are data). A table is behind an indirect jump
+    that does not fall through and whose targets dread.switches finds inside its function (behind a
+    delayed jump: behind its slot), up to the first address that a branch from outside that stretch
+    goes to (a target of the switch, of a direct branch). The case generator takes a load of code for
+    a run that reads instructions, and the linear decoding behind a table of odd length is out of
+    step; as data the table is neither. Not confirmed for other compilers' tables (none is known)."""
+    from dread import switches
+    from dread.program import Program
+    try:                                    # (the tables and the startup list as just written)
+        target = tgt.Target.load(target.root)
+        prog = Program(target, target.image(image.name))
+    except tgt.TargetError:
+        return []
+    arch = prog.arch
+    out = []
+    for fn in prog.functions:
+        sources = {}                        # target -> the addresses that go there
+        jumps = []
+        for a in fn.insns:
+            insn = prog.insn(a)
+            if insn is None:
+                continue
+            kind, target, falls = arch.flow(insn)
+            if kind in ("jump", "call") and isinstance(target, int):
+                sources.setdefault(prog.code_address(target), set()).add(a)
+            if kind == "ijump" and not falls:
+                jumps.append(insn)
+        for insn in jumps:
+            got = switches.resolve(prog, fn, insn.address)
+            if not got or not got[0]:
+                continue
+            for t in got[0]:
+                sources.setdefault(t, set()).add(insn.address)
+            lo = insn.address + insn.size
+            delayed = getattr(arch, "delay_slot", None)
+            if delayed is not None and delayed(insn):
+                slot = prog.insn(lo)
+                lo += slot.size if slot is not None else 0
+            ends = sorted(t for t, srcs in sources.items()
+                          if t > lo and any(not lo <= x < t for x in srcs))
+            if ends and ends[0] < fn.entry + 0x10000:
+                out.append((lo, ends[0]))
+    return sorted(set(out))
+
+
+def cut_tables(functions, code, cut):
+    """(functions, code) without the bytes of cut: the code ranges split around each table, each
+    function's instruction bytes less those of the tables inside it (up to the next entry)."""
+    for lo, hi in cut:
+        code = [piece for a, b, k in code
+                for piece in ([(a, lo, k), (hi, b, k)] if a < hi and lo < b else [(a, b, k)])
+                if piece[0] < piece[1]]
+    entries = [e for e, _, _ in functions]
+    out = []
+    for i, (entry, name, size) in enumerate(functions):
+        nxt = entries[i + 1] if i + 1 < len(entries) else None
+        inside = sum(min(hi, nxt or hi) - max(lo, entry) for lo, hi in cut
+                     if entry <= lo and (nxt is None or lo < nxt))
+        out.append((entry, name, size - inside))
+    return out, code
+
+
 def write_tables(image, functions, code, symbols, header="dread import-elf"):
     os.makedirs(image.config, exist_ok=True)
     with open(image.table("functions"), "w") as f:
@@ -418,10 +483,15 @@ def write_startup(toml_path, image_name, copies, key="startup", block=None):
     first = next((i for i in range(top + 1, end) if lines[i].replace(" ", "").startswith((key + "=[", key + "={"))),
                  None)
     if first is not None:
-        last = next((i for i in range(first, end) if lines[i].strip() == "]" or lines[i].rstrip().endswith(("]", "}"))
+        # (a one-line value may carry a comment: `fixed = {gp = ...}  # a note`; until 2026-11-07 it
+        # was not seen to end there, and the lines up to the next list's ']' were replaced)
+        code = lambda line: line.split("#", 1)[0].rstrip()     # noqa: E731
+        last = next((i for i in range(first, end) if lines[i].strip() == "]" or code(lines[i]).endswith(("]", "}"))
                      and i == first), None)
         if last is None:
             raise tgt.TargetError("%s: the %s list in %s does not end with a line ']'" % (toml_path, key, header))
+        if last == first and len(block) == 1 and code(lines[first]) == block[0].rstrip():
+            return False                    # (the same value: its comment stays)
         new = lines[:first] + block + lines[last + 1:]
     else:
         at = end
@@ -621,6 +691,13 @@ def main(argv=None):
                                                          os.path.relpath(target.file)))
     elif copies:
         print("startup copies for [image.%s] in dread.toml:\n%s" % (image.name, startup_toml(copies, files)))
+    if getattr(image.arch, "inline_tables", False) and args.payload:
+        cut = inline_tables(target, image)
+        if cut:
+            functions, code = cut_tables(functions, code, cut)
+            write_tables(image, functions, code, symbols)
+            print("switch tables inside the code cut out of its ranges: %s"
+                  % ", ".join("0x%x-0x%x" % c for c in cut))
     fixer = getattr(image.arch, "fixed_from_symbols", None)
     fixed = fixer({s.name: s.value for s in elf.symbols if s.name}) if fixer else {}
     if fixed and args.write_startup:

@@ -29,7 +29,7 @@ address	name	bytes
 0x5a4	led_off	8
 0x5ac	beep_on	8
 0x5b4	beep_off	8
-0x5bc	script_run	164
+0x5bc	script_run	156
 0x660	uart_init	12
 0x66c	uart_putc	24
 0x684	uart_puts	24
@@ -44,7 +44,7 @@ address	name	bytes
 0x7b8	apply_config	174
 0x868	read_line	68
 0x8ac	print_status	82
-0x900	handle_key	184
+0x900	handle_key	172
 0x9b8	main	142
 0xa48	__mulsi3	56
 0xa80	__muldi3	52

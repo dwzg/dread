@@ -7286,7 +7286,8 @@ toolchain and the engine's check").
 - [x] **A gizmo ARC build.** `examples/gizmo/fw/start_arc.S`, `arc.ld`, the Makefile's rule (GCC
   15.2, -mcpu=arc600: barrel shifter, no multiplier) and `examples/gizmo/arc`. Done 2026-11-07:
   `dread import-elf`, `dread functions`, and `dread asm --verify`, whose listing rebuilds the image
-  byte for byte in one pass (857 instructions, 6 raw: padding and two switch tables' bytes).
+  byte for byte in one pass (857 instructions, 6 raw: padding and two switch tables' bytes; since
+  the lifter, 2026-11-07, the import cuts the two tables out of the code ranges: 855 and 2).
 - [x] **The operand text** (`ArcAsm`: objdump's text, which GNU as reads back; branches to labels).
   Done with the decoder.
 - [x] **The engine** (`dread/engines/arc.py`: sparse 32-bit memory, instructions compiled to Python
@@ -7298,10 +7299,14 @@ toolchain and the engine's check").
   ARCompact simulator was found to check against (the decision). `dread test` on gizmo-arc's 13
   rewritten functions: all agree with generated cases, two moved by the overlay.
 - [ ] **regflow, switches, noreturn.** Switches: bound_check done (brhs/brlo, cmp, bmsk, and), the
-  dispatch runs on the engine; handle_key's and script_run's tables resolve. Left: regflow's bit
-  rules (bit_demand, store_demand) and value_step, noreturn on ARC, branch_deciders for the
-  generator's compare-guided answers, the zero-overhead loop's back edge in regflow and the lifter
-  (`loop_body`).
+  dispatch runs on the engine; handle_key's and script_run's tables resolve (brhs/brlo's limit was
+  K, one too many for dread.switches' mapping, until the lifter; a delayed jump's slot was taken for
+  its landing). Left: regflow's bit rules (bit_demand, store_demand) and value_step, noreturn on
+  ARC, branch_deciders for the generator's compare-guided answers (br with its immediate first,
+  handle_key's brlt 0x6c,r0, is skipped), the zero-overhead loop's back edge in regflow, and delay
+  slots in regflow: it takes bl.d's slot for code behind the call, so __muldi3, which sets r1 for
+  __umulsidi3 in the slot (mov_s r1,r2), reads r2 behind the call, and both stay refused by the
+  lifter.
 - [ ] **The mutation check** (`dread mutate`) on gizmo-arc's rewritten functions.
 - [x] **The system run**: reset at vector 0's j limm, interrupt entry (ilink1 and STATUS32_L1 for
   level 1, ilink2 and _L2 for a line AUX_IRQ_LEV makes level 2; E1, and for level 2 E2, cleared), j.f
@@ -7310,7 +7315,26 @@ toolchain and the engine's check").
   controller's line N is vector 3 + N (docs/decisions.md); a run that ends between a .d branch and
   its slot goes on behind the slot (the engine keeps the branch). Not confirmed on a core: the
   entry's details (the L bit, AUX_IRQ_LV12), level 2 (gizmo has none).
-- [ ] **The lifter** (`dread/lift_arc.py`) and its fuzzer, then readable C.
+- [x] **The lifter** (`dread/lift_arc.py`). Done 2026-11-07: registers as u32 variables, the flags
+  as four variables with the engine's formulas (followed one by one in the analyses), conditional
+  instructions as if statements, .aw/.ab/.as, delay slots (the analyses take a pair in the order it
+  runs; the C takes the branch's condition first, then the slot, then the branch), the
+  zero-overhead loop (`if (--lp_count) goto L_start;` behind the body's last instruction, lpcc's
+  exit), switches and a table of handlers (dispatch: a tail call through the register), returns
+  through a copy of blink (__umodsi3), the interrupt handler (GCC's interrupt("ilink1")). The
+  import cuts a switch's table of byte offsets out of the code ranges (elfimport.inline_tables): as
+  code the case generator dropped every input that reads it. On gizmo-arc `dread lift --check`
+  accepts 36 of the 41 functions not written by hand (irq_entry by the system run); refused:
+  _start (mov sp, limm), ram_crc (runs from RAM), __muldi3 and __umulsidi3 (regflow's delay slots,
+  above); dropped: handle_key, whose 0x9ae-0x9b2 no input reaches (GCC's dead code: its switch
+  enters 0x9a6 only with r0 in 0x64-0x6a, which sub3 and brhs always send away). Two of GCC's
+  rewrites call libgcc's __mulsi3 from the lifted C where the ARC600 has no multiplier: the final
+  value of a counted loop, and `if (c) x += y` as x + c * y; an empty asm on lp_count and on the
+  condition of a conditional instruction keeps both away (decisions.md). Not done: stack arguments
+  (refused; none on gizmo), registers beyond r0:r1 handed back (refused), calls bound in asm
+  (a read of a scratch register the callee leaves is refused), mul64, the extension instructions.
+- [ ] **The ARC lifter's fuzzer** (dread liftfuzz: a generator of random ARCompact blocks, as the
+  RISC-V and MSP430 ones), then readable C.
 - [x] **`dread new` for ARC**: an ELF of machine 93 (EM_ARC_COMPACT; tests/test_newtarget.py's
   BUILDS), and a raw image with `--arch arc600` (the entry from the reset vector's j limm). Done
   2026-11-07; gp from __SDATA_BEGIN__ (the layer's fixed_from_symbols).

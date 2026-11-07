@@ -23,8 +23,9 @@ is zero. That back edge belongs to no instruction: `flow` gives lp as a conditio
 
 Constructed from [arch]: isa ("arc600" or "arc700"), endian ("little"), ghidra.
 
-Not implemented yet (docs/porting.md, docs/todo.md "ARC"): regflow's bit rules and the case
-generator's hints, the overlay's long branch beyond 16 MiB, the system run and the lifter.
+Not implemented yet (docs/porting.md, docs/todo.md "ARC"): regflow's bit rules, its delay slots
+and the zero-overhead loop's back edge, the overlay's long branch beyond 16 MiB. The lifter is
+dread.lift_arc.
 """
 
 import struct
@@ -102,6 +103,8 @@ class Arc:
     default_callee_saved = tuple("r%d" % i for i in range(13, 26)) + ("gp", "fp")   # (gp: the small
                                     # data's base, which no function changes)
     profile = None
+    inline_tables = True        # GCC puts a switch's table of byte offsets behind its j_s [rN], in the
+                                # code (dread.elfimport cuts it out of the code ranges)
     # Instructions that fill a gap and do nothing (dread.lift's entered_unseen): nop_s, nop
     padding = {"arc600": (b"\xe0\x78", b"\x4a\x26\x00\x70"), "arc700": (b"\xe0\x78", b"\x4a\x26\x00\x70")}
 
@@ -353,7 +356,9 @@ class Arc:
 
     def bound_check(self, insn, prior=(), known=None):
         """(register, limit, before) when the instruction bounds a switch index (dread.switches):
-        brhs/brlo rN, K (GCC's: the index below K goes on to the table; set before the branch),
+        brhs/brlo rN, K (GCC's: the index below K goes on to the table, K values, limit K - 1; set
+        before the branch; until 2026-11-07 the limit was K, which dread.switches' mapping then
+        missed a target for),
         cmp rN, K (set before it: a bhi or bls behind it takes the way out), bmsk rN, rM, k (rN
         takes 0 .. 2^(k+1) - 1) and and rN, rM, 2^n - 1 (set after them)."""
         f = insn.fields
@@ -361,7 +366,7 @@ class Arc:
         if f.op == "br" and f.brcond in ("hs", "lo") and srcs[0][0] == "r" and srcs[1][0] == "i":
             k = srcs[1][1] & 0xFFFFFFFF
             if 0 < k <= 0x10000:
-                return CANON[srcs[0][1]], k, True
+                return CANON[srcs[0][1]], k - 1, True
         if f.op == "cmp" and not f.cond and srcs[0][0] == "r" and srcs[1][0] == "i":
             k = srcs[1][1] & 0xFFFFFFFF
             if 0 <= k < 0x10000:
