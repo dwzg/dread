@@ -40,7 +40,7 @@ is safe to run on hardware.
 |---|---|---|---|
 | ARM: ARM state, Thumb, Thumb-2 (Cortex-M3) | a32 36 / 52 · m3 36 / 50 · m3cpp 43 / 61 | 25 | the architecture the tools began on |
 | Cortex-M4F (FPv4-SP, DSP) | m4 44 / 58 | 2 | done |
-| RISC-V (RV32IMC) | rv32 32 / 47 · rv32cpp 39 / 58 | 11 | done |
+| RISC-V (RV32IMC) | rv32 32 / 47 · rv32cpp 39 / 58 | 11 | – |
 | MSP430 | msp430 79 / 130 | 1 | paused · `██████░░░░` 12 of 19 steps |
 | x86, 32-bit (i386) | i386 – / 47 · i386clang – / 47 | 3 | `████████░░` 59 of 75 steps |
 | MIPS32 | mips – / 47 | – | paused |
@@ -73,7 +73,7 @@ Gizmo (`examples/gizmo`) is DREAD's own test firmware, built for each architectu
 | [Documentation and packaging](docs/todo.md#documentation-and-packaging) | `██░░░░░░░░` | 1 of 4 |
 | [ARC](docs/todo.md#arc-arcompact-arc600-the-user-2026-11-07) | `███████░░░` | 10 of 15 |
 
-Complete: [Performance, first pass](docs/todo.md#performance-first-pass), [Phase 5: system run](docs/todo.md#phase-5-system-run), [Performance, second pass](docs/todo.md#performance-second-pass-2026-10-18-asked-for-by-the-user), [Performance, third pass](docs/todo.md#performance-third-pass-2026-10-19-asked-for-by-the-user), [Phase 7: reading aids, plugin, documentation](docs/todo.md#phase-7-reading-aids-plugin-documentation), [After the ARM phases](docs/todo.md#after-the-arm-phases), [Cortex-M4](docs/todo.md#cortex-m4-armv7e-m-with-fpv4-sp-the-user-2026-10-19-first-among-the-new-architectures), [C++](docs/todo.md#c).
+Complete: [Cortex-M4](docs/todo.md#cortex-m4-armv7e-m-with-fpv4-sp-the-user-2026-10-19-first-among-the-new-architectures).
 
 <!-- /status -->
 
