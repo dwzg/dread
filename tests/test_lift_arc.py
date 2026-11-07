@@ -359,3 +359,54 @@ def test_arc_push_style_save_restore_is_lifted(tmp_path):
         orig = Machine(Layout(t, t.image()), t.image().payload(), None).call(p.by_name["worker"].entry, *a).ret
         reb = Machine(Layout(t, t.image()), rebuilt, aliases).call(p.by_name["worker"].entry, *a).ret
         assert orig == reb, (a, orig, reb)
+
+
+STATUS_S = """
+    .text
+    .global crit, use
+    .align 4
+    .type crit, @function
+crit:                       ; a < b ? a + 1 : a - 1, in an interrupt-atomic section (lr/flag STATUS32)
+    lr r12,[status32]       ; save STATUS32 (flags and the interrupt-enable bits) in a scratch register
+    bic r11,r12,2           ; clear E1 (disable level-1 interrupts)
+    flag r11
+    cmp r0,r1
+    add.lt r0,r0,1
+    sub.ge r0,r0,1
+    flag r12                ; restore STATUS32 (re-enable interrupts, restore the entry flags)
+    j_s [blink]
+    .align 4
+    .type use, @function
+use:
+    j_s [blink]
+"""
+
+
+@needs_arc_gcc
+def test_arc_lr_flag_status32_is_lifted(tmp_path):
+    """An interrupt-atomic critical section: lr saves STATUS32, flag clears its interrupt-enable bit
+    and later restores it, with a conditional computation (add.lt/sub.ge) on the flags in between.
+    The lifter models the flags as its z/n/c/v and STATUS32's other low bits as a variable (0 at a
+    case's entry, interrupts inert); the lift check accepts crit and it agrees with the original on
+    the engine."""
+    from dread.emu import Layout, Machine
+    from dread import elfimport
+    from dread.overlay import load_placement
+    (tmp_path / "t.s").write_text(STATUS_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arc-elf32-as", "-mcpu=arc600", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arc-elf32-ld", "-Ttext=0x0", "-e", "use", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(ARC_TARGET.replace('name = "arc-snippets"', 'name = "arc-status"'))
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    lines = []
+    assert "crit" in lift.check(t, t.image(), ["crit"], out=lines.append, jobs=1), "\n".join(lines)
+    work = tmp_path / "build" / "lift-check" / "main"
+    aliases, _ = load_placement(str(work / "placement.json"))
+    rebuilt = (work / "payload.bin").read_bytes()
+    for a in [(5, 7, 0), (7, 5, 0), (0, 0, 0), (0xffffffff, 1, 0), (0x7fffffff, 0x80000000, 0)]:
+        orig = Machine(Layout(t, t.image()), t.image().payload(), None).call(p.by_name["crit"].entry, *a).ret
+        reb = Machine(Layout(t, t.image()), rebuilt, aliases).call(p.by_name["crit"].entry, *a).ret
+        assert orig == reb, (a, orig, reb)

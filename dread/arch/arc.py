@@ -302,6 +302,8 @@ class Arc:
             reads.add("flags")
         elif op == "flag":
             writes.add("flags")
+        elif op == "sr" and f.aux == ("i", D.AUX_NUMBERS["status32"]):
+            writes.add("flags")
         if op in ("adc", "sbc", "rrc", "rlc"):
             reads.add("flags")
         if f.cond:

@@ -1063,9 +1063,37 @@ class ArcLifter(lift.Lifter):
 
     # -- what does not branch --
 
+    STATUS32 = 0x0A
+
+    def _status(self, insn):
+        """The C of lr/flag/sr acting on STATUS32: an interrupt-atomic critical section saves it
+        (lr), clears its interrupt-enable bits and restores it (flag/sr). The flags are the lifter's
+        z/n/c/v variables; st32 holds STATUS32's other low bits (H, E1, E2), 0 at a case's entry
+        where interrupts are off and never fire, so the enable bits are inert in a case run and only
+        the flags are compared. lr reads them, flag updates the flags and the enable bits (its mask
+        0xf07), sr writes STATUS32 whole. lr/sr of any other auxiliary register (a device) is not
+        modelled."""
+        f = insn.fields
+        self.ctx["status_word"] = True
+        pack = "(st32 | ((u32)z << 11) | ((u32)n << 10) | ((u32)c << 9) | ((u32)v << 8))"
+        if f.op == "lr":
+            if f.aux != ("i", self.STATUS32):
+                raise Refused("0x%x: lr of an auxiliary register other than status32" % insn.address)
+            return self._set(f.dst, pack)
+        src = self.src(f.srcs[0])
+        if f.op == "flag":              # masks to 0xf07: the flags (bits 8-11) and H, E1, E2 (0-2)
+            return ("{ u32 fl = %s; z = fl >> 11 & 1; n = fl >> 10 & 1; c = fl >> 9 & 1; v = fl >> 8 & 1; "
+                    "st32 = (st32 & ~7u) | (fl & 7u); }" % src)
+        if f.aux != ("i", self.STATUS32):   # sr
+            raise Refused("0x%x: sr to an auxiliary register other than status32" % insn.address)
+        return ("{ u32 s = %s; z = s >> 11 & 1; n = s >> 10 & 1; c = s >> 9 & 1; v = s >> 8 & 1; "
+                "st32 = s & ~0xf00u; }" % src)
+
     def _plain(self, insn):
         f = insn.fields
         op, a = f.op, insn.address
+        if op in ("lr", "flag", "sr"):
+            return self._status(insn)
         if op in ("unknown", "ext") or op in CORE:
             raise Refused("0x%x: %s %s is not modelled" % (a, insn.mnemonic, insn.op_str))
         if op == "nop":
@@ -1340,6 +1368,8 @@ class ArcLifter(lift.Lifter):
                     "%s = p%d" % (r, ARGS.index(r)) if r in ARGS else "%s = 0" % r for r in VARS]
         lines.append("    u32 %s;" % ", ".join(init))
         lines.append("    u32 z = 0, n = 0, c = 0, v = 0, dc = 0;")
+        if ctx.get("status_word"):          # STATUS32's low bits (H, E1, E2), 0 at a case's entry
+            lines.append("    u32 st32 = 0;")
         lines += self.fixed_lines()
         if ctx.get("flags_in"):             # read before written: the caller's flags, from STATUS32
             lines.append('    { u32 t; __asm__ volatile ("lr %0,[status32]" : "=r"(t)); z = t >> 11 & 1; '
@@ -1350,8 +1380,8 @@ class ArcLifter(lift.Lifter):
         lines.append("    u32 sp0 = (u32)&frame[%d]%s;" % (k, " + %d" % ctx["out"] if ctx["out"] else ""))
         if ctx["switch"]:
             lines.append("    u32 index = 0;")
-        lines.append("    %s (void)z; (void)n; (void)c; (void)v; (void)dc; (void)sp0;"
-                     % " ".join("(void)%s;" % r for r in VARS))
+        lines.append("    %s (void)z; (void)n; (void)c; (void)v; (void)dc; (void)sp0;%s"
+                     % (" ".join("(void)%s;" % r for r in VARS), " (void)st32;" if ctx.get("status_word") else ""))
         lines += body
         lines.append("}")
         return "\n".join(lines) + "\n"
