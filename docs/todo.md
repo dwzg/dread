@@ -4609,7 +4609,10 @@ undone). Other decisions are taken by the recommended option and written down in
   2026-11-07 (the user: "a single worker running on a 32 thread machine"): pytest-xdist measured on
   the fast suite here, with the caches: one process 7 to 11 minutes, 12 workers 2.7 (1,709 passed,
   the same as one process), 24 workers 2.5. Taken: the push script runs -n 12, CI -n auto (its
-  runners' CPUs); pytest-xdist is in the test extra. Not measured yet: the whole suite on CI with it.
+  runners' CPUs); pytest-xdist is in the test extra. Then the tail (the user: long tests tail the
+  suite): the i386 lift check's planted mistake took 110 s of it (now seven functions in the fast
+  suite, all 14 in a slow test), the random IT-block clean-up 35 s (now six seeds of 50): 60 s with
+  12 workers, the longest test 16 s. Not measured yet: the whole suite on CI with it.
 
 ## Performance, first pass
 
