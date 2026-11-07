@@ -44,7 +44,7 @@ is safe to run on hardware.
 | MSP430 | msp430 79 / 130 | 1 | paused · `██████░░░░` 12 of 19 steps |
 | x86, 32-bit (i386) | i386 – / 47 · i386clang – / 47 | 3 | `████████░░` 59 of 75 steps |
 | MIPS32 | mips – / 47 | – | paused |
-| ARC (ARCompact, ARC600) | arc 36 / 54 | – | `███████░░░` 10 of 14 steps |
+| ARC (ARCompact, ARC600) | arc 36 / 54 | – | `███████░░░` 10 of 15 steps |
 | AArch64 | – | – | planned |
 | PowerPC 32 | – | – | planned |
 | ARM big-endian (BE-8) | – | – | planned |
@@ -71,7 +71,7 @@ Gizmo (`examples/gizmo`) is DREAD's own test firmware, built for each architectu
 | [More compilers](docs/todo.md#more-compilers) | `░░░░░░░░░░` | 0 of 6 |
 | [Scale and robustness](docs/todo.md#scale-and-robustness) | `████░░░░░░` | 4 of 9 |
 | [Documentation and packaging](docs/todo.md#documentation-and-packaging) | `██░░░░░░░░` | 1 of 4 |
-| [ARC](docs/todo.md#arc-arcompact-arc600-the-user-2026-11-07) | `███████░░░` | 10 of 14 |
+| [ARC](docs/todo.md#arc-arcompact-arc600-the-user-2026-11-07) | `███████░░░` | 10 of 15 |
 
 Complete: [Performance, first pass](docs/todo.md#performance-first-pass), [Phase 5: system run](docs/todo.md#phase-5-system-run), [Performance, second pass](docs/todo.md#performance-second-pass-2026-10-18-asked-for-by-the-user), [Performance, third pass](docs/todo.md#performance-third-pass-2026-10-19-asked-for-by-the-user), [Phase 7: reading aids, plugin, documentation](docs/todo.md#phase-7-reading-aids-plugin-documentation), [After the ARM phases](docs/todo.md#after-the-arm-phases), [Cortex-M4](docs/todo.md#cortex-m4-armv7e-m-with-fpv4-sp-the-user-2026-10-19-first-among-the-new-architectures), [C++](docs/todo.md#c).
 

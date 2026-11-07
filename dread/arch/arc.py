@@ -271,7 +271,8 @@ class Arc:
     def reg_effects(self, insn):
         """(reads, writes) by the tools' names, the flags as "flags" (STATUS32's Z, N, C, V). A
         conditional instruction reads the flags and its destination (kept where the condition
-        fails). A call writes blink and the registers a callee need not keep (r0-r12); a load or
+        fails). A call writes blink (what its callee writes is the callee's, as ARM's bl writes lr: the
+        analyses follow the callee, and its convention's scratch registers are theirs); a load or
         store with write-back (.aw, .ab) writes its base; push_s and pop_s read and write sp; lp
         writes nothing a register holds (LP_START and LP_END are auxiliary); mul64 writes mlo, mmid
         and mhi (r57-r59)."""
@@ -292,7 +293,8 @@ class Arc:
             reads.add("sp")
             writes.add("sp")
         elif op in ("bl", "jl"):
-            writes |= {"blink", "flags"} | {"r%d" % i for i in range(13)}
+            writes.add("blink")         # (what the callee writes is the callee's: dread.regflow follows
+                                        # it, as ARM's bl writes lr alone)
         elif op in ("mul64", "mulu64"):
             writes |= {"r57", "r58", "r59"}
         elif op == "lr" and f.aux == ("i", D.AUX_NUMBERS["status32"]):
