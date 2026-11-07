@@ -103,4 +103,6 @@ jobs:
       - name: Tests
         # faulthandler_timeout: a test running over 300 s gets every thread's stack written to the log
         # (the slowest takes about 170 s there), so that a hang shows where it waits
-        run: .venv/bin/python -m pytest -q -rs --durations=10 -o faulthandler_timeout=300
+        # -n auto: one worker per CPU of the runner (pytest-xdist; 2026-11-07, on the fast suite here: 12
+        # workers 2.7 minutes against 7 to 11 in one process)
+        run: .venv/bin/python -m pytest -q -rs --durations=10 -o faulthandler_timeout=300 -n auto

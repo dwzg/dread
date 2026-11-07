@@ -4606,6 +4606,10 @@ undone). Other decisions are taken by the recommended option and written down in
   few workers (DREAD's pools fork inside a test, so fewer of them per worker), the examples' caches
   kept between runs (actions/cache; but CI is where a test shows it passes without them: then one job
   without), or the suite split over jobs (by file). Measure the three on a branch before choosing.
+  2026-11-07 (the user: "a single worker running on a 32 thread machine"): pytest-xdist measured on
+  the fast suite here, with the caches: one process 7 to 11 minutes, 12 workers 2.7 (1,709 passed,
+  the same as one process), 24 workers 2.5. Taken: the push script runs -n 12, CI -n auto (its
+  runners' CPUs); pytest-xdist is in the test extra. Not measured yet: the whole suite on CI with it.
 
 ## Performance, first pass
 

@@ -10,7 +10,8 @@ requires-python = ">=3.11"
 dependencies = ["unicorn==2.1.4", "capstone>=5,<6"]
 
 [project.optional-dependencies]
-test = ["pytest", "pytest-timeout"]    # (a test that hangs fails: [tool.pytest.ini_options] timeout)
+test = ["pytest", "pytest-timeout", "pytest-xdist"]    # (a test that hangs fails: [tool.pytest.ini_options]
+                                                       # timeout; -n N runs the suite in N workers)
 prove = ["z3-solver>=4.12"]     # dread readable proves its rewrites of conditions and values with it
 dwarf = ["pyelftools>=0.29"]    # dread readable --score reads the source's names from debug information
 browser = ["playwright>=1.40"]  # tests/test_gui_browser.py looks at dread gui's pages in headless Chrome
