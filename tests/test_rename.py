@@ -21,6 +21,14 @@ def gizmo(tmp_path):
         here = os.path.join(gizmo_dir("m3"), "build", cache)
         if os.path.isdir(here):
             shutil.copytree(here, copy / "m3" / "build" / cache)
+    # beep_on's entry of the generated-case cache, which the renames move: an empty one where no earlier
+    # run made it (CI has no caches, and with the suite in parallel workers the test that made it here
+    # before runs in another one: 2026-11-07); its key matches nothing, so a run that needs the cases
+    # makes them anew
+    entry = copy / "m3" / "build" / "autocases" / "main" / "beep_on.json"
+    if not entry.exists():
+        entry.parent.mkdir(parents=True, exist_ok=True)
+        entry.write_text('{"key": null, "cases": []}')
     target = Target.load(str(copy / "m3"))
     return target, target.image()
 
