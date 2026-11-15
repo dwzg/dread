@@ -132,9 +132,15 @@ def code_intervals(elf, isa="a32"):
                 here = pieces
         out.extend(here)
     out.sort()
+    # A section boundary never merges away: two allocated sections can abut (an executable's .init
+    # ends where .plt starts, .text where .fini does), and the mapping symbols can make the runs on
+    # either side the same kind. Merged, the run would span both sections, and elf.read serves a read
+    # from one section only (it raises otherwise) -- so a single-.text image is unaffected, where no
+    # code interval ever crosses a section edge.
+    bounds = {s.addr for s in elf.sections if s.alloc and not s.nobits and s.size}
     merged = []
     for start, end, kind in out:                # adjacent intervals of one kind become one
-        if merged and merged[-1][2] == kind and merged[-1][1] == start:
+        if merged and merged[-1][2] == kind and merged[-1][1] == start and start not in bounds:
             merged[-1] = (merged[-1][0], end, kind)
         else:
             merged.append((start, end, kind))
